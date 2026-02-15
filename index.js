@@ -18,7 +18,7 @@ let sock;
 let qrImage = ""; 
 const tempCodes = new Map();
 
-// إعداد Firebase
+// --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
 const serviceAccount = JSON.parse(firebaseConfig);
 if (!admin.apps.length) {
@@ -29,19 +29,18 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// نبض القلب لمنع Render من النوم
+// --- 2. نبض القلب لمنع Render من النوم ---
 setInterval(() => {
     if (process.env.RENDER_EXTERNAL_HOSTNAME) {
         https.get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}/ping`);
     }
 }, 5 * 60 * 1000);
 
-// تصحيح الأرقام عالمياً
+// --- 3. تصحيح الأرقام عالمياً ---
 function normalizePhone(phone) {
-    let clean = phone.replace(/\D/g, '');
+    let clean = phone.replace(/\D/g, ''); 
     if (clean.startsWith('00')) clean = clean.substring(2);
     if (clean.startsWith('0') && clean.length > 5) clean = clean.substring(1);
-    // إذا كان الرقم ناقصاً (مثل 55xxx) افترض أنه سعودي
     if (clean.length === 9 && clean.startsWith('5')) clean = '966' + clean;
     return clean + "@s.whatsapp.net";
 }
@@ -55,9 +54,9 @@ async function startBot() {
         const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
         if (sessionSnap.exists) {
             fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
-            console.log("📂 تم استعادة الجلسة بنجاح.");
+            console.log("📂 تم استعادة الجلسة من Firebase.");
         }
-    } catch (e) { console.log("⚠️ فشل استعادة الجلسة."); }
+    } catch (e) { console.log("⚠️ لا توجد جلسة سابقة."); }
 
     const { state, saveCreds } = await useMultiFileAuthState(folder);
     const { version } = await fetchLatestBaileysVersion();
@@ -71,25 +70,39 @@ async function startBot() {
         generateHighQualityQR: true
     });
 
-    // إصلاح خطأ الحفظ (تجنب القراءة المباشرة من الملف لتفادي SyntaxError)
+    // حفظ التغييرات في Firebase (إصلاح خطأ SyntaxError)
     sock.ev.on('creds.update', async () => {
         await saveCreds();
         try {
+            // نستخدم state.creds مباشرة لتجنب قراءة ملف فارغ
             await db.collection('session').doc('session_otp_stable').set(state.creds, { merge: true });
-        } catch (e) { console.log("❌ خطأ حفظ Firebase"); }
+        } catch (e) { console.log("❌ فشل تحديث Firebase"); }
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, qr, lastDisconnect } = update;
         if (qr) qrImage = await QRCode.toDataURL(qr);
+        
         if (connection === 'open') {
             qrImage = "DONE";
             console.log("🚀 البوت مرتبط وجاهز!");
-            
-            // إرسال رسالة تأكيد لرقمك فور التفعيل
-            const myNumber = normalizePhone("0554526287");
-            await sock.sendMessage(myNumber, { text: "✅ تم تفعيل بوت نجم الإبداع بنجاح على سيرفر Render!" });
+
+            // --- ميزة الإرسال لمرة واحدة فقط ---
+            try {
+                const statusRef = db.collection('status').doc('activation');
+                const statusSnap = await statusRef.get();
+
+                if (!statusSnap.exists || !statusSnap.data().notified) {
+                    const myNumber = normalizePhone("0554526287");
+                    await sock.sendMessage(myNumber, { text: "✅ تم تفعيل بوت نجم الإبداع بنجاح!\n\nهذه الرسالة تصلك لمرة واحدة فقط للتأكد من نجاح النشر." });
+                    
+                    // تحديث الحالة في Firebase لمنع التكرار
+                    await statusRef.set({ notified: true });
+                    console.log("📩 تم إرسال رسالة التفعيل الأولى.");
+                }
+            } catch (e) { console.log("⚠️ فشل التحقق من حالة التفعيل."); }
         }
+
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
@@ -97,18 +110,18 @@ async function startBot() {
     });
 }
 
-// الواجهات والممرات
+// الواجهات
 app.get("/", (req, res) => {
-    if (qrImage === "DONE") res.send("<h1 style='text-align:center;color:green;'>✅ مرتبط وجاهز</h1>");
-    else if (qrImage) res.send(`<center><img src="${qrImage}"><h3>امسح الكود</h3></center>`);
-    else res.send("<center><h3>جاري التحميل...</h3></center>");
+    if (qrImage === "DONE") res.send("<h1 style='text-align:center;color:green;'>✅ مرتبط ومستقر</h1>");
+    else if (qrImage) res.send(`<center><img src="${qrImage}"><h3>امسح الكود لمرة واحدة</h3></center>`);
+    else res.send("<center><h3>جاري تشغيل المحرك...</h3></center>");
 });
 
 app.get("/ping", (req, res) => res.send("pong"));
 
 app.get("/request-otp", async (req, res) => {
     const phone = req.query.phone;
-    if (!phone) return res.status(400).send("No Phone");
+    if (!phone) return res.status(400).send("Phone is missing");
     const jid = normalizePhone(phone);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     tempCodes.set(phone, otp);
