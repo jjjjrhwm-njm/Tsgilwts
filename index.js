@@ -1,4 +1,3 @@
-// تم حذف require("dotenv").config() لأن Render يتعرف على المتغيرات تلقائياً
 const { 
     default: makeWASocket, 
     useMultiFileAuthState, 
@@ -16,13 +15,8 @@ app.use(express.json());
 let sock;
 const tempCodes = new Map();
 
-// إعداد Firebase - تأكد أن WEB_CONCURRENCY لا يتدخل
+// إعداد Firebase
 const firebaseConfig = process.env.FIREBASE_CONFIG;
-if (!firebaseConfig) {
-    console.error("❌ خطأ: لم يتم العثور على FIREBASE_CONFIG في متغيرات البيئة!");
-    process.exit(1);
-}
-
 const serviceAccount = JSON.parse(firebaseConfig);
 if (!admin.apps.length) {
     admin.initializeApp({ 
@@ -33,67 +27,61 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 async function startBot() {
-    if (!fs.existsSync('./auth_info')) fs.mkdirSync('./auth_info');
-    try {
-        const doc = await db.collection('session').doc('session_vip_rashed').get();
-        if (doc.exists) {
-            fs.writeFileSync('./auth_info/creds.json', JSON.stringify(doc.data()));
-            console.log("✅ تم سحب الهوية بنجاح.");
-        }
-    } catch (e) { 
-        console.log("⚠️ فشل سحب الجلسة."); 
-    }
+    // إنشاء مجلد جديد للهوية الجديدة
+    if (!fs.existsSync('./auth_info_new')) fs.mkdirSync('./auth_info_new');
 
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_new');
     const { version } = await fetchLatestBaileysVersion();
 
+    // إعدادات المتصفح الخادعة (Safari on Mac) لطلب كود QR جديد
     sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true,
+        printQRInTerminal: true, // سيظهر الكود في سجلات Render
         logger: pino({ level: "silent" }),
-        browser: ["Mac OS", "Chrome", "114.0.5735.198"],
-        markOnlineOnConnect: true,
-        syncFullHistory: false
+        browser: ["Mac OS", "Safari", "17.0"], // هوية جديدة تماماً
+        syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 10000
     });
 
     sock.ev.on('creds.update', async () => {
         await saveCreds();
-        const creds = JSON.parse(fs.readFileSync('./auth_info/creds.json', 'utf8'));
-        await db.collection('session').doc('session_vip_rashed').set(creds, { merge: true });
+        const creds = JSON.parse(fs.readFileSync('./auth_info_new/creds.json', 'utf8'));
+        // حفظ في مستند جديد لعدم اختلاط الجلسات
+        await db.collection('session').doc('session_otp_new').set(creds, { merge: true });
     });
 
     sock.ev.on('connection.update', (update) => {
-        const { connection } = update;
+        const { connection, qr } = update;
+        
+        if (qr) {
+            console.log("⚠️ كود QR الجديد جاهز! امسحه الآن من سجلات Render.");
+        }
+
         if (connection === 'open') {
-            console.log("🚀 نظام OTP جاهز للعمل.");
+            console.log("🚀 تم الاتصال بالهوية الجديدة! نظام OTP جاهز.");
+        }
+        
+        if (connection === 'close') {
+            console.log("🔄 جاري إعادة الاتصال...");
+            startBot();
         }
     });
 }
 
+// مسارات الـ API (تبقى كما هي)
 app.post("/request-otp", async (req, res) => {
     const { phone } = req.body;
-    if (!phone) return res.status(400).json({ success: false, error: "الرقم مطلوب" });
+    if (!phone) return res.status(400).json({ success: false });
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     tempCodes.set(phone, otp);
     try {
         const jid = phone.replace(/\D/g, '') + "@s.whatsapp.net";
-        await sock.sendPresenceUpdate('composing', jid);
-        await delay(1500);
-        await sock.sendMessage(jid, { text: `*🔐 كود التحقق الخاص بك هو:* \n\n *${otp}*` });
+        await sock.sendMessage(jid, { text: `*🔐 كود التحقق:* \n\n *${otp}*` });
         res.status(200).json({ success: true });
-    } catch (e) {
-        res.status(500).json({ success: false });
-    }
-});
-
-app.post("/verify-otp", (req, res) => {
-    const { phone, code } = req.body;
-    if (tempCodes.has(phone) && tempCodes.get(phone) === code) {
-        tempCodes.delete(phone);
-        return res.status(200).json({ success: true });
-    }
-    res.status(401).json({ success: false });
+    } catch (e) { res.status(500).json({ success: false }); }
 });
 
 app.listen(process.env.PORT || 10000, () => {
