@@ -2,14 +2,14 @@ const {
     default: makeWASocket, 
     useMultiFileAuthState, 
     fetchLatestBaileysVersion, 
-    DisconnectReason,
-    delay 
+    DisconnectReason 
 } = require("@whiskeysockets/baileys");
 const admin = require("firebase-admin");
 const express = require("express");
 const QRCode = require("qrcode");
 const fs = require("fs");
 const pino = require("pino");
+const https = require("https");
 
 const app = express();
 app.use(express.json());
@@ -18,7 +18,7 @@ let sock;
 let qrImage = ""; 
 const tempCodes = new Map();
 
-// إعداد Firebase
+// --- 1. إعداد Firebase (استعادة الجلسة) ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
 const serviceAccount = JSON.parse(firebaseConfig);
 if (!admin.apps.length) {
@@ -29,99 +29,111 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-async function startBot() {
-    // استخدام مجلد نظيف للهوية المستقرة
-    if (!fs.existsSync('./auth_info_stable')) fs.mkdirSync('./auth_info_stable');
+// --- 2. دالة النبض (Keep-Alive) لمنع Render من النوم ---
+setInterval(() => {
+    const url = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/ping`;
+    https.get(url, (res) => {
+        console.log("💓 نبض القلب: السيرفر مستيقظ");
+    }).on('error', (e) => {
+        console.log("⚠️ فشل النبض: " + e.message);
+    });
+}, 10 * 60 * 1000); // تنبيه كل 10 دقائق
 
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_stable');
+// --- 3. تصحيح الأرقام عالمياً (Global Normalization) ---
+function normalizePhone(phone) {
+    let clean = phone.replace(/\D/g, ''); // إزالة كل شيء عدا الأرقام
+    
+    // إزالة الأصفار الدولية الزائدة
+    if (clean.startsWith('00')) clean = clean.substring(2);
+    
+    // إذا بدأ بصفر واحد (رقم محلي)، يفترض أنه يحتاج مفتاح دولة
+    // ملاحظة: البوت سيعمل بشكل أفضل إذا أدخل المستخدم مفتاح الدولة مباشرة
+    if (clean.startsWith('0') && clean.length > 5) {
+        clean = clean.substring(1);
+    }
+    
+    return clean + "@s.whatsapp.net";
+}
+
+async function startBot() {
+    const folder = './auth_info_stable';
+    if (!fs.existsSync(folder)) fs.mkdirSync(folder);
+
+    // استعادة الجلسة من الذاكرة السحابية
+    try {
+        const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
+        if (sessionSnap.exists) {
+            fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
+            console.log("📂 تم استعادة الجلسة بنجاح.");
+        }
+    } catch (e) { console.log("⚠️ تعذر جلب الجلسة."); }
+
+    const { state, saveCreds } = await useMultiFileAuthState(folder);
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: "silent" }),
-        // 🛡️ خداع المتصفح: بصمة Chrome مستقرة جداً لتمثيل واتساب ويب
-        browser: ["Ubuntu", "Chrome", "121.0.6167.160"], 
-        printQRInTerminal: false,
+        browser: ["Ubuntu", "Chrome", "121.0.6167.160"],
         syncFullHistory: false,
-        // تحسين إعدادات الانتظار لمنع التغير المفاجئ لكود QR
-        connectTimeoutMs: 90000, 
-        defaultQueryTimeoutMs: 0,
-        keepAliveIntervalMs: 30000, // زيادة وقت نبضات القلب لضمان استقرار الجلسة
+        connectTimeoutMs: 60000,
         generateHighQualityQR: true
     });
 
     sock.ev.on('creds.update', async () => {
         await saveCreds();
-        const creds = JSON.parse(fs.readFileSync('./auth_info_stable/creds.json', 'utf8'));
+        const creds = JSON.parse(fs.readFileSync(`${folder}/creds.json`, 'utf8'));
         await db.collection('session').doc('session_otp_stable').set(creds, { merge: true });
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, qr, lastDisconnect } = update;
-        
-        if (qr) {
-            qrImage = await QRCode.toDataURL(qr);
-            console.log("🆕 كود QR جديد جاهز.. تم تحسين الثبات.");
-        }
-
+        if (qr) qrImage = await QRCode.toDataURL(qr);
         if (connection === 'open') {
             qrImage = "DONE";
-            console.log("🚀 تم الربط بنجاح! المتصفح الآن مخادع والجلسة مستقرة.");
+            console.log("🚀 البوت مرتبط وجاهز!");
         }
-
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                console.log("🔄 إعادة محاولة الاتصال لاستعادة الثبات...");
-                startBot();
-            }
+            if (shouldReconnect) startBot();
         }
     });
 }
 
-// واجهة عرض الكود المحدثة (تحديث كل دقيقة لضمان سهولة المسح)
+// واجهة السيرفر
 app.get("/", (req, res) => {
-    if (qrImage === "DONE") {
-        res.send("<body style='background:#f0f2f5;text-align:center;font-family:Arial;'><h1 style='color:#25d366;margin-top:100px;'>✅ متصل بنمط المتصفح المستقر</h1></body>");
-    } else if (qrImage) {
-        res.send(`
-            <body style="background:#f0f2f5;text-align:center;font-family:Arial;">
-                <div style="background:white;display:inline-block;padding:30px;border-radius:20px;margin-top:50px;box-shadow:0 4px 15px rgba(0,0,0,0.1);">
-                    <h2 style="color:#075e54;">نظام تحقق نجم الإبداع (V4 المستقر)</h2>
-                    <img src="${qrImage}" style="width:300px;height:300px;">
-                    <p style="color:#666;">افتح واتساب > الأجهزة المرتبطة > ربط جهاز</p>
-                    <p style="font-size:12px;color:blue;">تم ضبط التحديث التلقائي كل دقيقة لضمان راحتك في المسح</p>
-                </div>
-                <script>setTimeout(() => { location.reload(); }, 60000);</script> 
-            </body>
-        `);
-    } else {
-        res.send("<body style='text-align:center;margin-top:100px;'><h2>🔄 جاري تهيئة بصمة المتصفح...</h2><script>setTimeout(()=>location.reload(),5000)</script></body>");
-    }
+    if (qrImage === "DONE") res.send("<h1 style='text-align:center;color:green;'>✅ مرتبط</h1>");
+    else if (qrImage) res.send(`<center><img src="${qrImage}"><h3>امسح الكود مرة واحدة فقط</h3></center>`);
+    else res.send("<center><h3>جاري التحميل...</h3></center>");
 });
 
-// مسارات OTP
-app.post("/request-otp", async (req, res) => {
-    const { phone, appName } = req.body;
-    if (!phone || !appName) return res.status(400).json({ success: false });
+app.get("/ping", (req, res) => res.send("pong"));
+
+// --- 4. طلب الكود (GET) - متوافق مع سمالي ---
+app.get("/request-otp", async (req, res) => {
+    const phone = req.query.phone;
+    if (!phone) return res.status(400).send("Missing Phone");
+
+    const jid = normalizePhone(phone);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const key = `${phone}:${appName}`;
-    tempCodes.set(key, otp);
+    tempCodes.set(phone, otp);
+
     try {
-        const jid = phone.replace(/\D/g, '') + "@s.whatsapp.net";
-        await sock.sendMessage(jid, { text: `*🔐 كود التحقق لـ (${appName}):*\n\nكودك هو: *${otp}*` });
-        res.status(200).json({ success: true });
-    } catch (e) { res.status(500).json({ success: false }); }
+        await sock.sendMessage(jid, { text: `🔐 كود تحقق تطبيقك هو: *${otp}*` });
+        res.status(200).send("OK");
+    } catch (e) { res.status(500).send("Error"); }
 });
 
-app.post("/verify-otp", (req, res) => {
-    const { phone, appName, code } = req.body;
-    const key = `${phone}:${appName}`;
-    if (tempCodes.get(key) === code) {
-        tempCodes.delete(key);
-        res.status(200).json({ success: true });
-    } else { res.status(401).json({ success: false }); }
+// --- 5. التحقق من الكود (GET) ---
+app.get("/verify-otp", (req, res) => {
+    const { phone, code } = req.query;
+    if (tempCodes.get(phone) === code) {
+        tempCodes.delete(phone);
+        res.status(200).send("SUCCESS");
+    } else {
+        res.status(401).send("FAIL");
+    }
 });
 
 app.listen(process.env.PORT || 10000, () => startBot());
