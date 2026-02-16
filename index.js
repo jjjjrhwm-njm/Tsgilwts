@@ -38,17 +38,18 @@ setInterval(() => {
     const host = process.env.RENDER_EXTERNAL_HOSTNAME;
     if (host) {
         https.get(`https://${host}/ping`, (res) => {
-            console.log(`💓 نبض النظام: ${res.statusCode}`);
+            console.log(`💓 نبض النظام: مستقر (Status: ${res.statusCode})`);
         }).on('error', () => {});
     }
 }, 10 * 60 * 1000);
 
+// دالة الإرسال الآمن (المصفحة)
 async function safeSend(jid, content) {
     try {
-        if (sock && sock.authState && sock.user) {
-            await sock.sendMessage(jid, content);
+        if (sock && sock.user) {
+            return await sock.sendMessage(jid, content);
         }
-    } catch (e) { console.log("⚠️ تخطي إرسال: الاتصال غير جاهز."); }
+    } catch (e) { console.log("⚠️ فشل الإرسال: الاتصال غير مستقر."); }
 }
 
 function normalizePhone(phone) {
@@ -83,137 +84,120 @@ async function startBot() {
         browser: ["CreativeStar", "Chrome", "1.0"],
         printQRInTerminal: false, syncFullHistory: false,
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 0, // منع انتهاء الوقت في الاستعلامات الكبيرة
         keepAliveIntervalMs: 30000
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // تحديث Firebase كل دقيقة لتقليل الضغط
-    setInterval(async () => {
-        if (state.creds) {
-            await db.collection('session').doc('session_otp_stable').set(state.creds, { merge: true });
-        }
-    }, 60000);
-
+    // --- 4. محرك الأوامر التفاعلي المطور ---
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
-
-            const messageTimestamp = msg.messageTimestamp;
-            const now = Math.floor(Date.now() / 1000);
-            if (now - messageTimestamp > 15) return; // تجاهل الرسائل القديمة
 
             const jid = msg.key.remoteJid;
             const isMe = msg.key.fromMe;
             const sender = jid.split('@')[0].split(':')[0];
             const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
 
-            if (!isMe && sender !== myNumber) return;
+            // الفلتر الحديدي: إذا كانت الرسالة "نجم" فهي أمر، غير ذلك تجاهل "isMe" تماماً لمنع الإكمال التلقائي
+            if (isMe && !text.startsWith("نجم") && !userState.has(jid)) return;
 
             const currentState = userState.get(jid);
 
-            if (currentState && currentState.command === "نشر") {
+            if (currentState) {
+                // منع البوت من "الإجابة على نفسه" (تجاهل الرسالة إذا كانت تطابق آخر سؤال أرسله البوت)
+                if (isMe && text === currentState.lastPrompt) return;
+
                 if (text.toLowerCase() === "خروج") {
                     userState.delete(jid);
-                    return await safeSend(jid, { text: "❌ تم إلغاء العملية." });
+                    return await safeSend(jid, { text: "❌ تم إلغاء العملية والعودة للوضع الطبيعي." });
                 }
-                if (currentState.step === "LINK") {
-                    currentState.link = text;
-                    currentState.step = "DESC";
-                    userState.set(jid, currentState);
-                    return await safeSend(jid, { text: "✅ تم استلام الرابط. الآن أرسل *الوصف*:" });
-                }
-                if (currentState.step === "DESC") {
-                    currentState.desc = text;
-                    currentState.step = "TARGET";
-                    userState.set(jid, currentState);
-                    const usersSnap = await db.collection('users').get();
-                    let apps = [...new Set(usersSnap.docs.map(d => d.data().appName || "عام"))];
-                    let menu = "🎯 الجمهور:\n\n0 - للجميع\n";
-                    apps.forEach((name, i) => menu += `${i + 1} - [${name}]\n`);
-                    return await safeSend(jid, { text: menu + "\n💡 أرسل رقم الخيار." });
-                }
-                if (currentState.step === "TARGET") {
-                    const usersSnap = await db.collection('users').get();
-                    let targets = (text === "0") ? usersSnap.docs : usersSnap.docs.filter(d => (d.data().appName || "عام") === [...new Set(usersSnap.docs.map(x => x.data().appName || "عام"))][parseInt(text)-1]);
-                    
-                    await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length}...` });
-                    for (const doc of targets) {
-                        await safeSend(normalizePhone(doc.data().phone), { text: `📢 *جديد من نجم الإبداع!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` });
+
+                if (currentState.command === "نشر") {
+                    if (currentState.step === "LINK") {
+                        currentState.link = text;
+                        currentState.step = "DESC";
+                        currentState.lastPrompt = "✅ تم استلام الرابط. الآن أرسل *وصف التطبيق*:";
+                        userState.set(jid, currentState);
+                        return await safeSend(jid, { text: currentState.lastPrompt });
                     }
-                    userState.delete(jid);
-                    return await safeSend(jid, { text: "✅ اكتمل النشر بنجاح!" });
+                    if (currentState.step === "DESC") {
+                        currentState.desc = text;
+                        currentState.step = "TARGET";
+                        const snap = await db.collection('users').get();
+                        let apps = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
+                        let menu = "🎯 حدد الجمهور المستهدف:\n\n0 - 🌐 إرسال للجميع\n";
+                        apps.forEach((n, i) => menu += `${i + 1} - 📱 مستخدمي [${n}]\n`);
+                        currentState.lastPrompt = menu + "\n💡 أرسل رقم الخيار المطلوب.";
+                        userState.set(jid, currentState);
+                        return await safeSend(jid, { text: currentState.lastPrompt });
+                    }
+                    if (currentState.step === "TARGET") {
+                        const snap = await db.collection('users').get();
+                        let appsArr = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
+                        let targets = [];
+                        
+                        if (text === "0") { targets = snap.docs; } 
+                        else {
+                            const selectedApp = appsArr[parseInt(text) - 1];
+                            if (!selectedApp) {
+                                currentState.lastPrompt = "❌ رقم غير صحيح من القائمة. أرسل الرقم من الخيارات المذكورة أعلاه:";
+                                userState.set(jid, currentState);
+                                return await safeSend(jid, { text: currentState.lastPrompt });
+                            }
+                            targets = snap.docs.filter(d => (d.data().appName || "عام") === selectedApp);
+                        }
+
+                        await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length} مستخدم...` });
+                        for (const d of targets) {
+                            await safeSend(normalizePhone(d.data().phone), { text: `📢 *جديد من نجم الإبداع!*\n\n${currentState.desc}\n\n🔗 للتحميل:\n${currentState.link}` });
+                        }
+                        userState.delete(jid);
+                        return await safeSend(jid, { text: "✅ تمت العملية بنجاح تام!" });
+                    }
                 }
             }
 
+            // الأوامر الأساسية (مشفرة لتجاهل تكرار البوت)
             if (text === "نجم مساعدة") {
-                await safeSend(jid, { text: "🌟 *أوامر نجم:*\n1- نجم نشر\n2- نجم احصا\n3- نجم بنج\n💡 أرسل *خروج* للإلغاء." });
+                const help = `🌟 *لوحة تحكم نجم الإبداع:*
+1️⃣ *نجم نشر* : بث (تفاعلي).
+2️⃣ *نجم احصا* : إحصائيات.
+3️⃣ *نجم حضر* : قائمة تطبيقاتك.
+4️⃣ *نجم بنج* : حالة السيرفر.
+💡 أرسل *خروج* في أي وقت.`;
+                await safeSend(jid, { text: help });
             }
             if (text === "نجم نشر") {
-                userState.set(jid, { command: "نشر", step: "LINK" });
-                await safeSend(jid, { text: "🔗 أرسل *رابط التطبيق* الآن:" });
+                const prompt = "🔗 أرسل رابط التطبيق الآن:";
+                userState.set(jid, { command: "نشر", step: "LINK", lastPrompt: prompt });
+                await safeSend(jid, { text: prompt });
             }
             if (text === "نجم احصا") {
                 const snap = await db.collection('users').get();
-                await safeSend(jid, { text: `📊 الموثقين: ${snap.size}` });
+                await safeSend(jid, { text: `📊 إجمالي المشتركين الموثقين: ${snap.size}` });
             }
-        } catch (e) {}
+        } catch (e) { console.log("❌ خطأ معالجة أمر."); }
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, qr, lastDisconnect } = update;
         if (qr) qrImage = await QRCode.toDataURL(qr);
-        
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 النظام متصل ومستقر الآن.");
+            console.log("🚀 النظام متصل وشغال بنسبة 100%!");
         }
-        
         if (connection === 'close') {
             isStarting = false;
-            const shouldReconnect = (lastDisconnect.error instanceof Boom) ? 
-                lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut : true;
-            
-            if (shouldReconnect) {
-                console.log("🔄 إعادة تشغيل هادئة بعد 10 ثوانٍ...");
-                setTimeout(() => startBot(), 10000); // زيادة وقت الانتظار لقتل النسخ القديمة
+            const code = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode : 0;
+            if (code !== DisconnectReason.loggedOut) {
+                setTimeout(() => startBot(), 10000);
             }
         }
     });
 }
-
-app.get("/check-device", async (req, res) => {
-    const { id, appName } = req.query;
-    const userSnap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
-    if (!userSnap.empty) res.status(200).send("SUCCESS");
-    else res.status(404).send("NOT_FOUND");
-});
-
-app.get("/request-otp", async (req, res) => {
-    const { phone, name, app: appName, deviceId } = req.query;
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    tempCodes.set(phone, { otp, name, appName, deviceId });
-    try {
-        await safeSend(normalizePhone(phone), { text: `🔐 كود دخولك هو: *${otp}*` });
-        res.status(200).send("OK");
-    } catch (e) { res.status(500).send("Error"); }
-});
-
-app.get("/verify-otp", async (req, res) => {
-    const { phone, code } = req.query;
-    const data = tempCodes.get(phone);
-    if (data && data.otp === code) {
-        await db.collection('users').doc(phone).set({ 
-            name: data.name, phone, appName: data.appName, deviceId: data.deviceId, date: new Date() 
-        }, { merge: true });
-        tempCodes.delete(phone);
-        await safeSend(normalizePhone(myNumber), { text: `🆕 موثق جديد: ${data.name}` });
-        res.status(200).send("SUCCESS");
-    } else { res.status(401).send("FAIL"); }
-});
 
 app.get("/ping", (req, res) => res.send("💓"));
 app.get("/", (req, res) => res.send(qrImage === "DONE" ? "✅ Connected" : `<img src="${qrImage}">`));
