@@ -2,8 +2,7 @@ const {
     default: makeWASocket, 
     useMultiFileAuthState, 
     fetchLatestBaileysVersion, 
-    DisconnectReason,
-    Browsers 
+    DisconnectReason 
 } = require("@whiskeysockets/baileys");
 const { Boom } = require("@hapi/boom");
 const admin = require("firebase-admin");
@@ -11,6 +10,7 @@ const express = require("express");
 const QRCode = require("qrcode");
 const fs = require("fs");
 const pino = require("pino");
+const https = require("https");
 
 const app = express();
 app.use(express.json());
@@ -18,8 +18,9 @@ app.use(express.json());
 let sock;
 let qrImage = ""; 
 let isStarting = false;
+const tempCodes = new Map(); 
 const userState = new Map(); 
-const myNumber = "966554526287"; 
+const myNumber = "966554526287"; // رقم الإدمن
 
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
@@ -32,65 +33,247 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- 🚨 تعريف الهوية (تغيير جذري لضمان عدم سحب ملفات قديمة) ---
-const folder = './auth_android_new_system_v10'; 
-const firebaseDoc = 'session_android_new_system_v10';
+// --- 2. النبض الحديدي (كل 10 دقائق) ---
+setInterval(() => {
+    const host = process.env.RENDER_EXTERNAL_HOSTNAME;
+    if (host) {
+        https.get(`https://${host}/ping`, (res) => {
+            console.log(`💓 نبض النظام: مستقر ${res.statusCode}`);
+        }).on('error', () => {});
+    }
+}, 10 * 60 * 1000);
+
+// دالة الإرسال الآمن لضمان عدم الانهيار
+async function safeSend(jid, content) {
+    try {
+        if (sock && sock.user) {
+            return await sock.sendMessage(jid, content);
+        }
+    } catch (e) { console.log("⚠️ فشل الإرسال: السوكيت مغلق"); }
+}
+
+function normalizePhone(phone) {
+    let clean = phone.replace(/\D/g, ''); 
+    if (clean.startsWith('00')) clean = clean.substring(2);
+    if (clean.startsWith('0')) clean = clean.substring(1);
+    if (clean.length === 9 && clean.startsWith('5')) clean = '966' + clean;
+    else if (clean.length === 9 && /^(77|73|71|70)/.test(clean)) clean = '967' + clean;
+    else if (clean.length === 8 && /^[34567]/.test(clean)) clean = '974' + clean;
+    return clean + "@s.whatsapp.net";
+}
+
+// --- 3. محرك معالجة الأوامر المدمج (القوة + الأمان) ---
+async function processCommand(jid, text, sender, isMe) {
+    // 🛑 حماية مدمجة: منع البوت من الرد على إشعاراته الخاصة أو رسائل الخطأ لقتل التكرار
+    const botTokens = ["أرسل", "تم استلام", "رقم غير صحيح", "✅", "❌", "🎯", "🌟", "🚀"];
+    if (isMe && botTokens.some(token => text.includes(token))) return true;
+
+    // السماح فقط للإدمن (حتى لو راسلت نفسك)
+    if (sender !== myNumber && !isMe) return false;
+
+    const currentState = userState.get(jid);
+
+    // معالجة الحالات النشطة (نظام النشر التفاعلي)
+    if (currentState) {
+        if (text.toLowerCase() === "خروج") {
+            userState.delete(jid);
+            await safeSend(jid, { text: "❌ تم إلغاء العملية والعودة للوضع الطبيعي." });
+            return true;
+        }
+
+        if (currentState.command === "نشر") {
+            // خطوة 1: استلام الرابط
+            if (currentState.step === "waiting_link") {
+                if (!text.startsWith('http')) {
+                    await safeSend(jid, { text: "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http" });
+                    return true;
+                }
+                currentState.link = text;
+                currentState.step = "waiting_desc";
+                userState.set(jid, currentState);
+                await safeSend(jid, { text: "✅ تم استلام الرابط. الآن أرسل *الوصف*:" });
+                return true;
+            }
+
+            // خطوة 2: استلام الوصف
+            if (currentState.step === "waiting_desc") {
+                currentState.desc = text;
+                currentState.step = "waiting_target";
+                userState.set(jid, currentState);
+                
+                const snap = await db.collection('users').get();
+                let apps = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
+                let menu = "🎯 *اختر الجمهور المستهدف:*\n\n0 - 🌐 إرسال للجميع\n";
+                apps.forEach((n, i) => menu += `${i + 1} - 📱 مستخدمي [${n}]\n`);
+                await safeSend(jid, { text: menu + "\n💡 أرسل رقم الخيار المطلوب." });
+                return true;
+            }
+
+            // خطوة 3: التنفيذ النهائي
+            if (currentState.step === "waiting_target") {
+                const snap = await db.collection('users').get();
+                let appsArr = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
+                let targets = [];
+
+                if (text === "0") { 
+                    targets = snap.docs; 
+                } else {
+                    const idx = parseInt(text) - 1;
+                    if (isNaN(idx) || !appsArr[idx]) {
+                        await safeSend(jid, { text: "❌ رقم غير صحيح. اختر من القائمة أو أرسل *خروج*:" });
+                        return true;
+                    }
+                    targets = snap.docs.filter(d => (d.data().appName || "عام") === appsArr[idx]);
+                }
+
+                await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length} مستخدم...` });
+                
+                let successCount = 0;
+                for (const d of targets) {
+                    try {
+                        await safeSend(normalizePhone(d.data().phone), { 
+                            text: `📢 *تحديث جديد من نجم الإبداع!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` 
+                        });
+                        successCount++;
+                    } catch (e) {}
+                }
+                
+                userState.delete(jid); // مسح الحالة فوراً لضمان الصمت التام
+                await safeSend(jid, { text: `✅ تم النشر بنجاح لـ ${successCount} من أصل ${targets.length} مستخدم!` });
+                return true;
+            }
+        }
+        return true;
+    }
+
+    // الأوامر التي تبدأ بـ "نجم"
+    if (!text.startsWith("نجم")) return false;
+
+    switch (text) {
+        case "نجم":
+        case "نجم مساعدة":
+            await safeSend(jid, { text: `🌟 *أوامر نجم الإبداع:*
+
+1️⃣ *نجم نشر* - إعلان تفاعلي (3 خطوات)
+2️⃣ *نجم احصا* - إحصائيات المستخدمين
+3️⃣ *نجم بنج* - فحص سرعة الاتصال
+
+💡 أرسل *خروج* للإلغاء أثناء النشر.` });
+            break;
+            
+        case "نجم نشر":
+            userState.set(jid, { command: "نشر", step: "waiting_link" });
+            await safeSend(jid, { text: "🔗 *خطوة 1/3*\nأرسل *رابط التطبيق* الآن:" });
+            break;
+            
+        case "نجم احصا":
+            const snap = await db.collection('users').get();
+            await safeSend(jid, { text: `📊 إجمالي الموثقين: ${snap.size}` });
+            break;
+            
+        case "نجم بنج":
+            const start = Date.now();
+            await safeSend(jid, { text: "🏓 جاري الفحص..." });
+            await safeSend(jid, { text: `✅ الاستجابة: ${Date.now() - start}ms` });
+            break;
+    }
+    return true;
+}
 
 async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
+    const folder = './auth_info_stable';
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
-    
-    // محاولة جلب الجلسة من فيرباس (فقط إذا كانت موجودة وصحيحة)
     try {
-        const sessionSnap = await db.collection('session').doc(firebaseDoc).get();
-        if (sessionSnap.exists) {
-            fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
-        }
-    } catch (e) { console.log("⚠️ لا توجد جلسة سابقة في فيرباس"); }
+        const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
+        if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
+    } catch (e) {}
     
     const { state, saveCreds } = await useMultiFileAuthState(folder);
     const { version } = await fetchLatestBaileysVersion();
     
     sock = makeWASocket({ 
-        version, 
-        auth: state, 
-        logger: pino({ level: "silent" }), 
-        // 🚨 التعديل الأهم: تعريف أندرويد بإصدار كروم حديث (131) بدلاً من (20) القديم
-        browser: ["Android", "Chrome", "131.0.6778.204"], 
-        printQRInTerminal: false,
-        syncFullHistory: false,
-        connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000
+        version, auth: state, logger: pino({ level: "silent" }), 
+        browser: ["CreativeStar", "Chrome", "1.0"],
+        printQRInTerminal: false, syncFullHistory: false,
+        connectTimeoutMs: 60000, keepAliveIntervalMs: 30000
     });
 
     sock.ev.on('creds.update', saveCreds);
 
+    sock.ev.on('messages.upsert', async (m) => {
+        try {
+            const msg = m.messages[0];
+            if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+
+            // 🛡️ حماية: تجاهل الرسائل القديمة (أكثر من 15 ثانية) لمنع خطأ 428
+            const now = Math.floor(Date.now() / 1000);
+            if (now - msg.messageTimestamp > 15) return;
+
+            const jid = msg.key.remoteJid;
+            const isMe = msg.key.fromMe;
+            const sender = jid.split('@')[0].split(':')[0];
+            const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
+
+            if (!text) return;
+
+            // استدعاء المحرك المدمج
+            await processCommand(jid, text, sender, isMe);
+            
+        } catch (e) { console.log("❌ خطأ معالجة:", e.message); }
+    });
+
     sock.ev.on('connection.update', async (update) => {
         const { connection, qr, lastDisconnect } = update;
         if (qr) qrImage = await QRCode.toDataURL(qr);
-        
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 تم الربط بنجاح بنظام الأندرويد الحديث!");
-            // حفظ الجلسة الجديدة فوراً
-            await db.collection('session').doc(firebaseDoc).set(state.creds, { merge: true });
+            console.log("🚀 النظام متصل ومستقر.");
+            // ترحيب التشغيل
+            setTimeout(() => {
+                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز للعمل!*\nأرسل *نجم* للتحكم." });
+            }, 2000);
         }
-        
         if (connection === 'close') {
             isStarting = false;
             const code = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode : 0;
             if (code !== DisconnectReason.loggedOut) setTimeout(() => startBot(), 10000);
         }
     });
-    
-    // معالج الرسائل المعتاد (كودك الشغال)
-    sock.ev.on('messages.upsert', async (m) => {
-        // ... (منطق الأوامر الخاص بك يبقى كما هو) ...
-    });
 }
+
+// --- ممرات الـ API المصفحة ---
+app.get("/check-device", async (req, res) => {
+    const { id, appName } = req.query;
+    const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
+    res.status(snap.empty ? 404 : 200).send(snap.empty ? "NOT_FOUND" : "SUCCESS");
+});
+
+app.get("/request-otp", async (req, res) => {
+    const { phone, name, app: appName, deviceId } = req.query;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    tempCodes.set(phone, { otp, name, appName, deviceId });
+    try {
+        await safeSend(normalizePhone(phone), { text: `🔐 أهلاً ${name}، كود دخولك لـ [${appName}] هو: *${otp}*` });
+        res.status(200).send("OK");
+    } catch (e) { res.status(500).send("Error"); }
+});
+
+app.get("/verify-otp", async (req, res) => {
+    const { phone, code } = req.query;
+    const data = tempCodes.get(phone);
+    if (data && data.otp === code) {
+        await db.collection('users').doc(phone).set({ 
+            name: data.name, phone, appName: data.appName, deviceId: data.deviceId, date: new Date() 
+        }, { merge: true });
+        tempCodes.delete(phone);
+        await safeSend(normalizePhone(myNumber), { text: `🆕 مستخدم جديد: ${data.name} (${phone})` });
+        res.status(200).send("SUCCESS");
+    } else res.status(401).send("FAIL");
+});
 
 app.get("/ping", (req, res) => res.send("💓"));
 app.get("/", (req, res) => res.send(qrImage === "DONE" ? "✅ Connected" : `<img src="${qrImage}">`));
