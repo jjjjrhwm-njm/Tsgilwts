@@ -9,7 +9,6 @@ const express = require("express");
 const QRCode = require("qrcode");
 const fs = require("fs");
 const pino = require("pino");
-const https = require("https");
 
 const app = express();
 app.use(express.json());
@@ -17,116 +16,115 @@ app.use(express.json());
 let sock;
 let qrImage = ""; 
 const tempCodes = new Map();
+const myNumber = "966554526287@s.whatsapp.net"; // رقمك للتحكم
 
-// --- 1. إعداد Firebase ---
+// إعداد Firebase
 const firebaseConfig = process.env.FIREBASE_CONFIG;
 const serviceAccount = JSON.parse(firebaseConfig);
 if (!admin.apps.length) {
     admin.initializeApp({ 
-        credential: admin.credential.cert(serviceAccount),
-        databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+        credential: admin.credential.cert(serviceAccount)
     });
 }
 const db = admin.firestore();
 
-// --- 2. نبض القلب لمنع Render من النوم ---
-setInterval(() => {
-    if (process.env.RENDER_EXTERNAL_HOSTNAME) {
-        https.get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}/ping`);
-    }
-}, 5 * 60 * 1000);
-
-// --- 3. تصحيح الأرقام عالمياً ---
 function normalizePhone(phone) {
     let clean = phone.replace(/\D/g, ''); 
-    if (clean.startsWith('00')) clean = clean.substring(2);
-    if (clean.startsWith('0') && clean.length > 5) clean = clean.substring(1);
     if (clean.length === 9 && clean.startsWith('5')) clean = '966' + clean;
     return clean + "@s.whatsapp.net";
 }
 
 async function startBot() {
     const folder = './auth_info_stable';
-    if (!fs.existsSync(folder)) fs.mkdirSync(folder);
-
-    // استعادة الجلسة من Firebase
-    try {
-        const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
-        if (sessionSnap.exists) {
-            fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
-            console.log("📂 تم استعادة الجلسة من Firebase.");
-        }
-    } catch (e) { console.log("⚠️ لا توجد جلسة سابقة."); }
-
     const { state, saveCreds } = await useMultiFileAuthState(folder);
-    const { version } = await fetchLatestBaileysVersion();
+
+    // استعادة الجلسة من Firebase لضمان الاستقرار
+    try {
+        const sessionSnap = await db.collection('session').doc('creds').get();
+        if (sessionSnap.exists && !fs.existsSync(`${folder}/creds.json`)) {
+            fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
+        }
+    } catch (e) {}
 
     sock = makeWASocket({
-        version,
         auth: state,
         logger: pino({ level: "silent" }),
-        browser: ["Ubuntu", "Chrome", "121.0.6167.160"],
-        syncFullHistory: false,
-        generateHighQualityQR: true
+        browser: ["CreativeStar", "Chrome", "1.0"]
     });
 
-    // حفظ التغييرات في Firebase (إصلاح خطأ SyntaxError)
     sock.ev.on('creds.update', async () => {
         await saveCreds();
-        try {
-            // نستخدم state.creds مباشرة لتجنب قراءة ملف فارغ
-            await db.collection('session').doc('session_otp_stable').set(state.creds, { merge: true });
-        } catch (e) { console.log("❌ فشل تحديث Firebase"); }
+        await db.collection('session').doc('creds').set(state.creds, { merge: true });
     });
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, qr, lastDisconnect } = update;
+    // --- نظام أوامر الوتساب (نجم نشر، نجم احصا، نجم حضر) ---
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
+        const sender = msg.key.remoteJid;
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+
+        if (sender !== myNumber) return; // السماح لك فقط بالتحكم
+
+        // 1. أمر النشر: نجم نشر [الرابط]
+        if (text.startsWith("نجم نشر")) {
+            const link = text.replace("نجم نشر", "").trim();
+            const usersSnap = await db.collection('users').get();
+            let count = 0;
+            usersSnap.forEach(async (doc) => {
+                const user = doc.data();
+                await sock.sendMessage(normalizePhone(user.phone), { text: `🔥 تطبيق جديد!\nحمله من هنا: ${link}` });
+                count++;
+            });
+            await sock.sendMessage(myNumber, { text: `✅ تم البدء بنشر الرابط لـ ${count} مستخدم.` });
+        }
+
+        // 2. أمر الإحصائيات: نجم احصا
+        if (text === "نجم احصا") {
+            const usersSnap = await db.collection('users').get();
+            await sock.sendMessage(myNumber, { text: `📊 إجمالي المستخدمين المسجلين: ${usersSnap.size}` });
+        }
+
+        // 3. أمر الحضر/القائمة: نجم حضر
+        if (text === "نجم حضر") {
+            const apps = ["راشد", "نت فلكس"];
+            let report = "📱 اختر التطبيق لعرض المستخدمين:\n";
+            apps.forEach((name, i) => report += `${i + 1} - تطبيق ${name}\n`);
+            await sock.sendMessage(myNumber, { text: report });
+        }
+
+        // معالجة اختيار رقم التطبيق (1 أو 2)
+        if (text === "1" || text === "2") {
+            const appName = text === "1" ? "Rashid" : "Netflix";
+            const usersSnap = await db.collection('users').where("app", "==", appName).get();
+            let list = `👥 مستخدمي تطبيق ${appName}:\n`;
+            usersSnap.forEach(doc => {
+                const u = doc.data();
+                list += `👤 ${u.name} - 📞 ${u.phone}\n`;
+            });
+            await sock.sendMessage(myNumber, { text: list });
+        }
+    });
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, qr } = update;
         if (qr) qrImage = await QRCode.toDataURL(qr);
-        
-        if (connection === 'open') {
-            qrImage = "DONE";
-            console.log("🚀 البوت مرتبط وجاهز!");
-
-            // --- ميزة الإرسال لمرة واحدة فقط ---
-            try {
-                const statusRef = db.collection('status').doc('activation');
-                const statusSnap = await statusRef.get();
-
-                if (!statusSnap.exists || !statusSnap.data().notified) {
-                    const myNumber = normalizePhone("0554526287");
-                    await sock.sendMessage(myNumber, { text: "✅ تم تفعيل بوت نجم الإبداع بنجاح!\n\nهذه الرسالة تصلك لمرة واحدة فقط للتأكد من نجاح النشر." });
-                    
-                    // تحديث الحالة في Firebase لمنع التكرار
-                    await statusRef.set({ notified: true });
-                    console.log("📩 تم إرسال رسالة التفعيل الأولى.");
-                }
-            } catch (e) { console.log("⚠️ فشل التحقق من حالة التفعيل."); }
-        }
-
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
-        }
+        if (connection === 'open') qrImage = "DONE";
     });
 }
 
-// الواجهات
-app.get("/", (req, res) => {
-    if (qrImage === "DONE") res.send("<h1 style='text-align:center;color:green;'>✅ مرتبط ومستقر</h1>");
-    else if (qrImage) res.send(`<center><img src="${qrImage}"><h3>امسح الكود لمرة واحدة</h3></center>`);
-    else res.send("<center><h3>جاري تشغيل المحرك...</h3></center>");
-});
-
-app.get("/ping", (req, res) => res.send("pong"));
-
+// ممر طلب الكود المحدث (حفظ في Firebase وإشعار المطور)
 app.get("/request-otp", async (req, res) => {
-    const phone = req.query.phone;
-    if (!phone) return res.status(400).send("Phone is missing");
-    const jid = normalizePhone(phone);
+    const { phone, name, app: appName } = req.query;
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     tempCodes.set(phone, otp);
+
     try {
-        await sock.sendMessage(jid, { text: `🔐 كود تحقق تطبيقك هو: *${otp}*` });
+        // حفظ دائم في Firebase
+        await db.collection('users').doc(phone).set({ name, phone, app: appName, date: new Date() }, { merge: true });
+        
+        await sock.sendMessage(normalizePhone(phone), { text: `🔐 أهلاً يا ${name}، كودك هو: *${otp}*` });
+        await sock.sendMessage(myNumber, { text: `🆕 سجل مستخدم جديد!\n👤 الاسم: ${name}\n📞 الرقم: ${phone}\n📱 التطبيق: ${appName}` });
         res.status(200).send("OK");
     } catch (e) { res.status(500).send("Error"); }
 });
@@ -139,4 +137,5 @@ app.get("/verify-otp", (req, res) => {
     } else res.status(401).send("FAIL");
 });
 
+app.get("/", (req, res) => res.send(qrImage === "DONE" ? "✅ Connected" : `<img src="${qrImage}">`));
 app.listen(process.env.PORT || 10000, () => startBot());
