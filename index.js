@@ -64,16 +64,13 @@ function normalizePhone(phone) {
 
 // --- 3. محرك معالجة الأوامر المدمج (القوة + الأمان) ---
 async function processCommand(jid, text, sender, isMe) {
-    // 🛑 حماية مدمجة: منع البوت من الرد على إشعاراته الخاصة أو رسائل الخطأ لقتل التكرار
     const botTokens = ["أرسل", "تم استلام", "رقم غير صحيح", "✅", "❌", "🎯", "🌟", "🚀"];
     if (isMe && botTokens.some(token => text.includes(token))) return true;
 
-    // السماح فقط للإدمن (حتى لو راسلت نفسك)
     if (sender !== myNumber && !isMe) return false;
 
     const currentState = userState.get(jid);
 
-    // معالجة الحالات النشطة (نظام النشر التفاعلي)
     if (currentState) {
         if (text.toLowerCase() === "خروج") {
             userState.delete(jid);
@@ -82,7 +79,6 @@ async function processCommand(jid, text, sender, isMe) {
         }
 
         if (currentState.command === "نشر") {
-            // خطوة 1: استلام الرابط
             if (currentState.step === "waiting_link") {
                 if (!text.startsWith('http')) {
                     await safeSend(jid, { text: "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http" });
@@ -95,12 +91,10 @@ async function processCommand(jid, text, sender, isMe) {
                 return true;
             }
 
-            // خطوة 2: استلام الوصف
             if (currentState.step === "waiting_desc") {
                 currentState.desc = text;
                 currentState.step = "waiting_target";
                 userState.set(jid, currentState);
-                
                 const snap = await db.collection('users').get();
                 let apps = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
                 let menu = "🎯 *اختر الجمهور المستهدف:*\n\n0 - 🌐 إرسال للجميع\n";
@@ -109,15 +103,12 @@ async function processCommand(jid, text, sender, isMe) {
                 return true;
             }
 
-            // خطوة 3: التنفيذ النهائي
             if (currentState.step === "waiting_target") {
                 const snap = await db.collection('users').get();
                 let appsArr = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
                 let targets = [];
-
-                if (text === "0") { 
-                    targets = snap.docs; 
-                } else {
+                if (text === "0") { targets = snap.docs; } 
+                else {
                     const idx = parseInt(text) - 1;
                     if (isNaN(idx) || !appsArr[idx]) {
                         await safeSend(jid, { text: "❌ رقم غير صحيح. اختر من القائمة أو أرسل *خروج*:" });
@@ -125,9 +116,7 @@ async function processCommand(jid, text, sender, isMe) {
                     }
                     targets = snap.docs.filter(d => (d.data().appName || "عام") === appsArr[idx]);
                 }
-
                 await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length} مستخدم...` });
-                
                 let successCount = 0;
                 for (const d of targets) {
                     try {
@@ -137,8 +126,7 @@ async function processCommand(jid, text, sender, isMe) {
                         successCount++;
                     } catch (e) {}
                 }
-                
-                userState.delete(jid); // مسح الحالة فوراً لضمان الصمت التام
+                userState.delete(jid);
                 await safeSend(jid, { text: `✅ تم النشر بنجاح لـ ${successCount} من أصل ${targets.length} مستخدم!` });
                 return true;
             }
@@ -146,7 +134,6 @@ async function processCommand(jid, text, sender, isMe) {
         return true;
     }
 
-    // الأوامر التي تبدأ بـ "نجم"
     if (!text.startsWith("نجم")) return false;
 
     switch (text) {
@@ -160,17 +147,14 @@ async function processCommand(jid, text, sender, isMe) {
 
 💡 أرسل *خروج* للإلغاء أثناء النشر.` });
             break;
-            
         case "نجم نشر":
             userState.set(jid, { command: "نشر", step: "waiting_link" });
             await safeSend(jid, { text: "🔗 *خطوة 1/3*\nأرسل *رابط التطبيق* الآن:" });
             break;
-            
         case "نجم احصا":
             const snap = await db.collection('users').get();
             await safeSend(jid, { text: `📊 إجمالي الموثقين: ${snap.size}` });
             break;
-            
         case "نجم بنج":
             const start = Date.now();
             await safeSend(jid, { text: "🏓 جاري الفحص..." });
@@ -184,11 +168,11 @@ async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
-    // --- تحديث الهوية (مجلد جديد وملف جديد في Firebase) ---
-    const folder = './auth_info_new_star'; 
+    // --- تحديث أسماء الهوية (تم التغيير لضمان بداية جديدة) ---
+    const folder = './auth_info_pro_v3'; 
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     try {
-        const sessionSnap = await db.collection('session').doc('session_otp_new_star').get();
+        const sessionSnap = await db.collection('session').doc('session_otp_pro_v3').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
     
@@ -197,7 +181,8 @@ async function startBot() {
     
     sock = makeWASocket({ 
         version, auth: state, logger: pino({ level: "silent" }), 
-        browser: ["CreativeStar", "Chrome", "1.0"],
+        // تحديث إعدادات المتصفح لحل مشكلة "تعذر الربط"
+        browser: ['Mac OS', 'Chrome', '121.0.6167.184'],
         printQRInTerminal: false, syncFullHistory: false,
         connectTimeoutMs: 60000, keepAliveIntervalMs: 30000
     });
@@ -208,22 +193,15 @@ async function startBot() {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
-
-            // 🛡️ حماية: تجاهل الرسائل القديمة (أكثر من 15 ثانية) لمنع خطأ 428
             const now = Math.floor(Date.now() / 1000);
             if (now - msg.messageTimestamp > 15) return;
-
             const jid = msg.key.remoteJid;
             const isMe = msg.key.fromMe;
             const sender = jid.split('@')[0].split(':')[0];
             const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
-
             if (!text) return;
-
-            // استدعاء المحرك المدمج
             await processCommand(jid, text, sender, isMe);
-            
-        } catch (e) { console.log("❌ خطأ معالجة:", e.message); }
+        } catch (e) {}
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -232,13 +210,10 @@ async function startBot() {
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 النظام متصل بالرقم الجديد بنجاح.");
-            
-            // مزامنة الهوية الجديدة مع Firebase
-            await db.collection('session').doc('session_otp_new_star').set(state.creds, { merge: true });
-
+            console.log("🚀 النظام متصل ومستقر بالهوية الجديدة.");
+            await db.collection('session').doc('session_otp_pro_v3').set(state.creds, { merge: true });
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *تم ربط الهوية الجديدة بنجاح!*\nأنا الآن جاهز للعمل من الرقم الجديد." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز بالرقم الجديد!*\nأرسل *نجم* للتحكم." });
             }, 2000);
         }
         if (connection === 'close') {
@@ -249,7 +224,6 @@ async function startBot() {
     });
 }
 
-// --- ممرات الـ API المصفحة ---
 app.get("/check-device", async (req, res) => {
     const { id, appName } = req.query;
     const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
