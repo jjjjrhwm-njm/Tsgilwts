@@ -4,6 +4,7 @@ const {
     fetchLatestBaileysVersion, 
     DisconnectReason 
 } = require("@whiskeysockets/baileys");
+const { Boom } = require("@hapi/boom"); // مكتبة هامة لمعالجة أخطاء الاتصال
 const admin = require("firebase-admin");
 const express = require("express");
 const QRCode = require("qrcode");
@@ -17,7 +18,7 @@ app.use(express.json());
 let sock;
 let qrImage = ""; 
 const tempCodes = new Map(); 
-const myNumber = "966554526287"; // رقمك للتحكم
+const myNumber = "966554526287"; 
 
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
@@ -34,7 +35,7 @@ const db = admin.firestore();
 setInterval(() => {
     if (process.env.RENDER_EXTERNAL_HOSTNAME) {
         https.get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}/ping`, (res) => {
-            console.log("💓 نبض حديدي: السيرفر مستيقظ");
+            // نبض صامت للحفاظ على السيرفر
         }).on('error', () => {});
     }
 }, 10 * 60 * 1000);
@@ -65,11 +66,13 @@ async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(folder);
     const { version } = await fetchLatestBaileysVersion();
     
+    // إعداد الاتصال مع تقليل سجلات Pino لمنع الازدحام
     sock = makeWASocket({ 
         version, 
         auth: state, 
         logger: pino({ level: "silent" }), 
-        browser: ["CreativeStar", "Chrome", "1.0"] 
+        browser: ["CreativeStar", "Chrome", "1.0"],
+        printQRInTerminal: false
     });
 
     sock.ev.on('creds.update', async () => {
@@ -77,89 +80,77 @@ async function startBot() {
         try { await db.collection('session').doc('session_otp_stable').set(state.creds, { merge: true }); } catch (e) {}
     });
 
-    // --- 4. محرك الأوامر الحديدي ---
+    // --- 4. محرك الأوامر الحديدي (منقح) ---
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.message) return;
         
-        // جلب رقم المرسل (سواء كان أنت أو غيرك)
         const jid = msg.key.remoteJid;
         const sender = jid.split('@')[0].split(':')[0];
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
-        // السماح بالأوامر فقط إذا كان المرسل هو رقمك الخاص
+        // السماح لك بالتحكم حتى لو أرسلت لنفسك
         if (sender !== myNumber) return;
 
-        // 🟢 أمر: نجم مساعدة
         if (text === "نجم مساعدة") {
             const help = `🌟 *قائمة أوامر نجم الإبداع للتحكم:*
             
 1️⃣ *نجم نشر [الرابط]* : نشر تطبيق لكل المشتركين.
-2️⃣ *نجم احصا* : عرض عدد المستخدمين وتفاصيلهم.
-3️⃣ *نجم حضر* : عرض قائمة التطبيقات النشطة.
-4️⃣ *نجم فحص [الرقم]* : التأكد من تسجيل رقم معين.
-5️⃣ *نجم حذف [الرقم]* : حذف مستخدم من قاعدة البيانات.
-6️⃣ *نجم بنج* : فحص سرعة استجابة السيرفر.
-7️⃣ *نجم مسح* : مسح الذاكرة المؤقتة للأكواد.`;
+2️⃣ *نجم احصا* : عرض إحصائيات المستخدمين.
+3️⃣ *نجم حضر* : عرض قائمة تطبيقاتك.
+4️⃣ *نجم بنج* : فحص سرعة السيرفر.
+5️⃣ *نجم حذف [الرقم]* : حذف مستخدم.`;
             await sock.sendMessage(jid, { text: help });
         }
 
-        // 🟢 أمر: نجم نشر
         if (text.startsWith("نجم نشر")) {
             const link = text.replace("نجم نشر", "").trim();
             const usersSnap = await db.collection('users').get();
             let count = 0;
             for (const doc of usersSnap.docs) {
-                await sock.sendMessage(normalizePhone(doc.data().phone), { text: `📢 *تنبيه من نجم الإبداع!*\n🚀 تطبيق جديد متاح الآن للتحميل:\n🔗 ${link}` });
+                await sock.sendMessage(normalizePhone(doc.data().phone), { text: `📢 *تنبيه من نجم الإبداع!*\n🚀 تطبيق جديد متاح للتحميل:\n🔗 ${link}` });
                 count++;
             }
-            await sock.sendMessage(jid, { text: `✅ تمت عملية البث بنجاح لـ ${count} مستخدم.` });
+            await sock.sendMessage(jid, { text: `✅ تم البث لـ ${count} مستخدم.` });
         }
 
-        // 🟢 أمر: نجم احصا
         if (text === "نجم احصا") {
             const usersSnap = await db.collection('users').get();
-            let msgText = `📊 *إحصائيات النظام الحديدي:*\n\n👥 إجمالي المستخدمين: ${usersSnap.size}\n\n`;
-            usersSnap.forEach(doc => {
-                const u = doc.data();
-                msgText += `👤 ${u.name} | 📱 ${u.appName}\n`;
-            });
+            let msgText = `📊 *إحصائيات النظام:*\n👥 إجمالي المستخدمين: ${usersSnap.size}\n`;
             await sock.sendMessage(jid, { text: msgText });
         }
 
-        // 🟢 أمر: نجم حضر (عرض التطبيقات)
         if (text === "نجم حضر") {
             const usersSnap = await db.collection('users').get();
             let apps = [...new Set(usersSnap.docs.map(d => d.data().appName || "عام"))];
-            let report = "📱 *قائمة تطبيقاتك المحقونة:*\n";
-            apps.forEach((name, i) => report += `\n${i + 1} - تطبيق: *${name}*`);
+            let report = "📱 *تطبيقاتك المحقونة:*";
+            apps.forEach((name, i) => report += `\n${i + 1} - ${name}`);
             await sock.sendMessage(jid, { text: report });
-        }
-
-        // 🟢 أمر: نجم حذف
-        if (text.startsWith("نجم حذف")) {
-            const target = text.replace("نجم حذف", "").trim();
-            await db.collection('users').doc(target).delete();
-            await sock.sendMessage(jid, { text: `🗑️ تم حذف الرقم ${target} من النظام.` });
-        }
-
-        // 🟢 أمر: نجم بنج
-        if (text === "نجم بنج") {
-            const start = Date.now();
-            await sock.sendMessage(jid, { text: "⏳ جاري الفحص..." });
-            const lat = Date.now() - start;
-            await sock.sendMessage(jid, { text: `🚀 سرعة السيرفر: ${lat}ms\n💓 الحالة: مستقر 24/7` });
         }
     });
 
+    // --- 5. منطق الاتصال الذكي (حل مشكلة التكرار) ---
     sock.ev.on('connection.update', async (update) => {
-        const { connection, qr } = update;
+        const { connection, qr, lastDisconnect } = update;
+        
         if (qr) qrImage = await QRCode.toDataURL(qr);
+        
         if (connection === 'open') {
             qrImage = "DONE";
-            console.log("🚀 النظام متصل وشغال!");
+            console.log("🚀 النظام متصل وشغال!"); // سيظهر مرة واحدة فقط الآن
         }
-        if (connection === 'close') startBot();
+        
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect.error instanceof Boom) ? 
+                lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut : true;
+            
+            console.log("⚠️ تم إغلاق الاتصال، السبب:", lastDisconnect.error, "إعادة المحاولة:", shouldReconnect);
+            
+            if (shouldReconnect) {
+                // انتظار 5 ثوانٍ قبل إعادة التشغيل لمنع الحلقة المفرغة
+                setTimeout(() => startBot(), 5000);
+            }
+        }
     });
 }
 
@@ -177,7 +168,7 @@ app.get("/request-otp", async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     tempCodes.set(phone, { otp, name, appName, deviceId });
     try {
-        await sock.sendMessage(normalizePhone(phone), { text: `🔐 أهلاً يا ${name}، كود الدخول لتطبيق [${appName}] هو: *${otp}*` });
+        await sock.sendMessage(normalizePhone(phone), { text: `🔐 كود الدخول لتطبيق [${appName}] هو: *${otp}*` });
         res.status(200).send("OK");
     } catch (e) { res.status(500).send("Error"); }
 });
@@ -191,7 +182,7 @@ app.get("/verify-otp", async (req, res) => {
             name: data.name, phone, appName: data.appName, deviceId: data.deviceId, date: new Date() 
         }, { merge: true });
         tempCodes.delete(phone);
-        await sock.sendMessage(normalizePhone(myNumber), { text: `🆕 *عضو جديد موثق:*\n👤 الاسم: ${data.name}\n📱 التطبيق: ${data.appName}\n📞 الرقم: ${phone}` });
+        await sock.sendMessage(normalizePhone(myNumber), { text: `🆕 تم توثيق مستخدم:\n👤 ${data.name}\n📱 ${data.appName}` });
         res.status(200).send("SUCCESS");
     } else { res.status(401).send("FAIL"); }
 });
