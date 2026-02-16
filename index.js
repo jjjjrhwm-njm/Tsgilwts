@@ -17,15 +17,15 @@ app.use(express.json());
 
 let sock;
 let qrImage = ""; 
-let isConnecting = false;
+let isStarting = false;
 const tempCodes = new Map(); 
-const userState = new Map(); // لإدارة خطوات "نجم نشر"
+const userState = new Map(); 
 const myNumber = "966554526287"; 
 
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
-const serviceAccount = JSON.parse(firebaseConfig);
 if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(firebaseConfig);
     admin.initializeApp({ 
         credential: admin.credential.cert(serviceAccount),
         databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
@@ -38,21 +38,19 @@ setInterval(() => {
     const host = process.env.RENDER_EXTERNAL_HOSTNAME;
     if (host) {
         https.get(`https://${host}/ping`, (res) => {
-            console.log(`💓 نبض النظام: مستقر (Code: ${res.statusCode})`);
+            console.log(`💓 نبض النظام: ${res.statusCode}`);
         }).on('error', () => {});
     }
 }, 10 * 60 * 1000);
 
-// دالة الإرسال الآمن (Shield)
 async function safeSend(jid, content) {
     try {
-        if (sock && sock.user) {
+        if (sock && sock.authState && sock.user) {
             await sock.sendMessage(jid, content);
         }
-    } catch (e) { console.log("⚠️ حماية: تعذر الإرسال بسبب حالة السوكيت."); }
+    } catch (e) { console.log("⚠️ تخطي إرسال: الاتصال غير جاهز."); }
 }
 
-// محرك تمييز الدول الذكي
 function normalizePhone(phone) {
     let clean = phone.replace(/\D/g, ''); 
     if (clean.startsWith('00')) clean = clean.substring(2);
@@ -64,11 +62,12 @@ function normalizePhone(phone) {
 }
 
 async function startBot() {
-    if (isConnecting) return;
-    isConnecting = true;
+    if (isStarting) return;
+    isStarting = true;
 
     const folder = './auth_info_stable';
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
+    
     try {
         const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
         if (sessionSnap.exists) {
@@ -84,136 +83,108 @@ async function startBot() {
         browser: ["CreativeStar", "Chrome", "1.0"],
         printQRInTerminal: false, syncFullHistory: false,
         connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0, // منع انتهاء الوقت في الاستعلامات الكبيرة
         keepAliveIntervalMs: 30000
     });
 
-    sock.ev.on('creds.update', async () => {
-        await saveCreds();
-        try { await db.collection('session').doc('session_otp_stable').set(state.creds, { merge: true }); } catch (e) {}
-    });
+    sock.ev.on('creds.update', saveCreds);
 
-    // --- 4. محرك الأوامر التفاعلي المصفح ---
+    // تحديث Firebase كل دقيقة لتقليل الضغط
+    setInterval(async () => {
+        if (state.creds) {
+            await db.collection('session').doc('session_otp_stable').set(state.creds, { merge: true });
+        }
+    }, 60000);
+
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
 
-            // حماية: تجاهل الرسائل القديمة (أكثر من 10 ثوانٍ) لمنع خطأ 428
             const messageTimestamp = msg.messageTimestamp;
             const now = Math.floor(Date.now() / 1000);
-            if (now - messageTimestamp > 10) return;
+            if (now - messageTimestamp > 15) return; // تجاهل الرسائل القديمة
 
             const jid = msg.key.remoteJid;
             const isMe = msg.key.fromMe;
             const sender = jid.split('@')[0].split(':')[0];
-            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "";
+            const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
 
-            // السماح لك بالتحكم (رقمك أو أي رسالة تخرج من حساب البوت)
             if (!isMe && sender !== myNumber) return;
 
             const currentState = userState.get(jid);
 
-            // منطق الخطوات التفاعلية (نجم نشر)
             if (currentState && currentState.command === "نشر") {
                 if (text.toLowerCase() === "خروج") {
                     userState.delete(jid);
                     return await safeSend(jid, { text: "❌ تم إلغاء العملية." });
                 }
-
                 if (currentState.step === "LINK") {
                     currentState.link = text;
                     currentState.step = "DESC";
                     userState.set(jid, currentState);
-                    return await safeSend(jid, { text: "✅ الرابط تمام.\n\n📝 الآن أرسل *وصف التطبيق* (النص الذي سيظهر للناس):" });
+                    return await safeSend(jid, { text: "✅ تم استلام الرابط. الآن أرسل *الوصف*:" });
                 }
-                
                 if (currentState.step === "DESC") {
                     currentState.desc = text;
                     currentState.step = "TARGET";
                     userState.set(jid, currentState);
                     const usersSnap = await db.collection('users').get();
                     let apps = [...new Set(usersSnap.docs.map(d => d.data().appName || "عام"))];
-                    let menu = "🎯 حدد الجمهور المستهدف:\n\n0 - 🌐 إرسال للجميع\n";
-                    apps.forEach((name, i) => menu += `${i + 1} - 📱 مستخدمي [${name}]\n`);
-                    return await safeSend(jid, { text: menu + "\n💡 أرسل رقم الخيار المطلوب." });
+                    let menu = "🎯 الجمهور:\n\n0 - للجميع\n";
+                    apps.forEach((name, i) => menu += `${i + 1} - [${name}]\n`);
+                    return await safeSend(jid, { text: menu + "\n💡 أرسل رقم الخيار." });
                 }
-
                 if (currentState.step === "TARGET") {
                     const usersSnap = await db.collection('users').get();
-                    let targets = [];
-                    if (text === "0") {
-                        targets = usersSnap.docs;
-                    } else {
-                        let apps = [...new Set(usersSnap.docs.map(d => d.data().appName || "عام"))];
-                        const selectedApp = apps[parseInt(text) - 1];
-                        if (!selectedApp) return await safeSend(jid, { text: "❌ رقم غير صحيح من القائمة." });
-                        targets = usersSnap.docs.filter(d => (d.data().appName || "عام") === selectedApp);
-                    }
-
-                    await safeSend(jid, { text: `🚀 جاري البث لـ ${targets.length} مستخدم...` });
+                    let targets = (text === "0") ? usersSnap.docs : usersSnap.docs.filter(d => (d.data().appName || "عام") === [...new Set(usersSnap.docs.map(x => x.data().appName || "عام"))][parseInt(text)-1]);
+                    
+                    await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length}...` });
                     for (const doc of targets) {
-                        const u = doc.data();
-                        await safeSend(normalizePhone(u.phone), { 
-                            text: `📢 *تحديث جديد من نجم الإبداع!*\n\n${currentState.desc}\n\n🔗 للتحميل:\n${currentState.link}` 
-                        });
+                        await safeSend(normalizePhone(doc.data().phone), { text: `📢 *جديد من نجم الإبداع!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` });
                     }
                     userState.delete(jid);
-                    return await safeSend(jid, { text: "✅ تمت عملية النشر بنجاح تام!" });
+                    return await safeSend(jid, { text: "✅ اكتمل النشر بنجاح!" });
                 }
             }
 
-            // الأوامر الأساسية
             if (text === "نجم مساعدة") {
-                const menu = `🌟 *لوحة تحكم نجم الإبداع الحديدية:*
-                
-1️⃣ *نجم نشر* : بث رابط (تفاعلي).
-2️⃣ *نجم احصا* : تقرير المستخدمين.
-3️⃣ *نجم حضر* : قائمة التطبيقات.
-4️⃣ *نجم بنج* : سرعة السيرفر.
-5️⃣ *نجم مسح* : تصفير الذاكرة.
-
-💡 أرسل *خروج* لإلغاء أي خطوة.`;
-                await safeSend(jid, { text: menu });
+                await safeSend(jid, { text: "🌟 *أوامر نجم:*\n1- نجم نشر\n2- نجم احصا\n3- نجم بنج\n💡 أرسل *خروج* للإلغاء." });
             }
-
             if (text === "نجم نشر") {
                 userState.set(jid, { command: "نشر", step: "LINK" });
-                await safeSend(jid, { text: "📢 بدأنا عملية النشر.\n\n🔗 أرسل *رابط التطبيق* الآن:" });
+                await safeSend(jid, { text: "🔗 أرسل *رابط التطبيق* الآن:" });
             }
-
             if (text === "نجم احصا") {
                 const snap = await db.collection('users').get();
-                await safeSend(jid, { text: `📊 إجمالي المشتركين الموثقين: ${snap.size}` });
+                await safeSend(jid, { text: `📊 الموثقين: ${snap.size}` });
             }
-
-            if (text === "نجم بنج") {
-                const start = Date.now();
-                await safeSend(jid, { text: "📡" });
-                await safeSend(jid, { text: `🚀 الاستجابة: ${Date.now() - start}ms\n💓 الحالة: مصفح 100%` });
-            }
-        } catch (e) { console.log("❌ خطأ داخلي في معالجة الأمر."); }
+        } catch (e) {}
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, qr, lastDisconnect } = update;
         if (qr) qrImage = await QRCode.toDataURL(qr);
+        
         if (connection === 'open') {
             qrImage = "DONE";
-            isConnecting = false;
-            console.log("🚀 النظام متصل وشغال بنسبة 100%!");
+            isStarting = false;
+            console.log("🚀 النظام متصل ومستقر الآن.");
         }
+        
         if (connection === 'close') {
-            isConnecting = false;
-            const code = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode : 0;
-            if (code !== DisconnectReason.loggedOut) {
-                console.log("⚠️ تعثر الاتصال، جاري الإنعاش بعد 5 ثوانٍ...");
-                setTimeout(() => startBot(), 5000);
+            isStarting = false;
+            const shouldReconnect = (lastDisconnect.error instanceof Boom) ? 
+                lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut : true;
+            
+            if (shouldReconnect) {
+                console.log("🔄 إعادة تشغيل هادئة بعد 10 ثوانٍ...");
+                setTimeout(() => startBot(), 10000); // زيادة وقت الانتظار لقتل النسخ القديمة
             }
         }
     });
 }
 
-// ممرات الـ API
 app.get("/check-device", async (req, res) => {
     const { id, appName } = req.query;
     const userSnap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
@@ -226,7 +197,7 @@ app.get("/request-otp", async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     tempCodes.set(phone, { otp, name, appName, deviceId });
     try {
-        await safeSend(normalizePhone(phone), { text: `🔐 أهلاً ${name}، كود دخول [${appName}] هو: *${otp}*` });
+        await safeSend(normalizePhone(phone), { text: `🔐 كود دخولك هو: *${otp}*` });
         res.status(200).send("OK");
     } catch (e) { res.status(500).send("Error"); }
 });
@@ -239,9 +210,9 @@ app.get("/verify-otp", async (req, res) => {
             name: data.name, phone, appName: data.appName, deviceId: data.deviceId, date: new Date() 
         }, { merge: true });
         tempCodes.delete(phone);
-        await safeSend(normalizePhone(myNumber), { text: `🆕 موثق جديد: ${data.name} (${phone})` });
+        await safeSend(normalizePhone(myNumber), { text: `🆕 موثق جديد: ${data.name}` });
         res.status(200).send("SUCCESS");
-    } else res.status(401).send("FAIL");
+    } else { res.status(401).send("FAIL"); }
 });
 
 app.get("/ping", (req, res) => res.send("💓"));
