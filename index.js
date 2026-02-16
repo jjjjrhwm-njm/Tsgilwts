@@ -64,16 +64,13 @@ function normalizePhone(phone) {
 
 // --- 3. محرك معالجة الأوامر المدمج (القوة + الأمان) ---
 async function processCommand(jid, text, sender, isMe) {
-    // 🛑 حماية مدمجة: منع البوت من الرد على إشعاراته الخاصة أو رسائل الخطأ لقتل التكرار
     const botTokens = ["أرسل", "تم استلام", "رقم غير صحيح", "✅", "❌", "🎯", "🌟", "🚀"];
     if (isMe && botTokens.some(token => text.includes(token))) return true;
 
-    // السماح فقط للإدمن (حتى لو راسلت نفسك)
     if (sender !== myNumber && !isMe) return false;
 
     const currentState = userState.get(jid);
 
-    // معالجة الحالات النشطة (نظام النشر التفاعلي)
     if (currentState) {
         if (text.toLowerCase() === "خروج") {
             userState.delete(jid);
@@ -82,7 +79,6 @@ async function processCommand(jid, text, sender, isMe) {
         }
 
         if (currentState.command === "نشر") {
-            // خطوة 1: استلام الرابط
             if (currentState.step === "waiting_link") {
                 if (!text.startsWith('http')) {
                     await safeSend(jid, { text: "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http" });
@@ -95,7 +91,6 @@ async function processCommand(jid, text, sender, isMe) {
                 return true;
             }
 
-            // خطوة 2: استلام الوصف
             if (currentState.step === "waiting_desc") {
                 currentState.desc = text;
                 currentState.step = "waiting_target";
@@ -109,7 +104,6 @@ async function processCommand(jid, text, sender, isMe) {
                 return true;
             }
 
-            // خطوة 3: التنفيذ النهائي
             if (currentState.step === "waiting_target") {
                 const snap = await db.collection('users').get();
                 let appsArr = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
@@ -138,7 +132,7 @@ async function processCommand(jid, text, sender, isMe) {
                     } catch (e) {}
                 }
                 
-                userState.delete(jid); // مسح الحالة فوراً لضمان الصمت التام
+                userState.delete(jid); 
                 await safeSend(jid, { text: `✅ تم النشر بنجاح لـ ${successCount} من أصل ${targets.length} مستخدم!` });
                 return true;
             }
@@ -146,7 +140,6 @@ async function processCommand(jid, text, sender, isMe) {
         return true;
     }
 
-    // الأوامر التي تبدأ بـ "نجم"
     if (!text.startsWith("نجم")) return false;
 
     switch (text) {
@@ -184,12 +177,11 @@ async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
-    // --- تحديث اسم الهوية لضمان جلسة جديدة نظيفة (تغيير المسميات فقط) ---
-    const folder = './auth_info_star_prime'; 
+    // --- تحديث اسم الهوية لضمان جلسة جديدة نظيفة (v_final) ---
+    const folder = './auth_info_star_final_force'; 
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     try {
-        // --- تحديث اسم الملف في Firebase للهوية الجديدة ---
-        const sessionSnap = await db.collection('session').doc('session_otp_star_prime').get();
+        const sessionSnap = await db.collection('session').doc('session_otp_star_final_force').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
     
@@ -198,7 +190,8 @@ async function startBot() {
     
     sock = makeWASocket({ 
         version, auth: state, logger: pino({ level: "silent" }), 
-        browser: ["CreativeStar", "Chrome", "1.0"],
+        // تغيير هوية المتصفح لإجبار وتساب على قبول الربط كجهاز جديد
+        browser: ["Windows", "Chrome", "11.0"],
         printQRInTerminal: false, syncFullHistory: false,
         connectTimeoutMs: 60000, keepAliveIntervalMs: 30000
     });
@@ -209,21 +202,14 @@ async function startBot() {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
-
-            // 🛡️ حماية: تجاهل الرسائل القديمة (أكثر من 15 ثانية) لمنع خطأ 428
             const now = Math.floor(Date.now() / 1000);
             if (now - msg.messageTimestamp > 15) return;
-
             const jid = msg.key.remoteJid;
             const isMe = msg.key.fromMe;
             const sender = jid.split('@')[0].split(':')[0];
             const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
-
             if (!text) return;
-
-            // استدعاء المحرك المدمج
             await processCommand(jid, text, sender, isMe);
-            
         } catch (e) { console.log("❌ خطأ معالجة:", e.message); }
     });
 
@@ -233,13 +219,10 @@ async function startBot() {
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 النظام متصل ومستقر.");
-            
-            // مزامنة الهوية في Firebase
-            await db.collection('session').doc('session_otp_star_prime').set(state.creds, { merge: true });
-
+            console.log("🚀 النظام متصل ومستقر بالهوية الجديدة.");
+            await db.collection('session').doc('session_otp_star_final_force').set(state.creds, { merge: true });
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز بالهوية الجديدة!*\nأرسل *نجم* للتحكم." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز بالرقم الجديد!*\nأرسل *نجم* للتحكم." });
             }, 2000);
         }
         if (connection === 'close') {
@@ -250,7 +233,7 @@ async function startBot() {
     });
 }
 
-// --- ممرات الـ API المصفحة ---
+// --- ممرات الـ API ---
 app.get("/check-device", async (req, res) => {
     const { id, appName } = req.query;
     const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
