@@ -184,10 +184,11 @@ async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
-    const folder = './auth_info_stable';
+    // --- تحديث الهوية (مجلد جديد وملف جديد في Firebase) ---
+    const folder = './auth_info_new_star'; 
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     try {
-        const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
+        const sessionSnap = await db.collection('session').doc('session_otp_new_star').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
     
@@ -231,10 +232,13 @@ async function startBot() {
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 النظام متصل ومستقر.");
-            // ترحيب التشغيل
+            console.log("🚀 النظام متصل بالرقم الجديد بنجاح.");
+            
+            // مزامنة الهوية الجديدة مع Firebase
+            await db.collection('session').doc('session_otp_new_star').set(state.creds, { merge: true });
+
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز للعمل!*\nأرسل *نجم* للتحكم." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 *تم ربط الهوية الجديدة بنجاح!*\nأنا الآن جاهز للعمل من الرقم الجديد." });
             }, 2000);
         }
         if (connection === 'close') {
