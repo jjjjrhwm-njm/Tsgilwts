@@ -20,7 +20,7 @@ let qrImage = "";
 let isStarting = false;
 const tempCodes = new Map(); 
 const userState = new Map(); 
-const myNumber = "966554526287"; // رقم الإدمن
+const myNumber = "966554526287"; 
 
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
@@ -43,7 +43,6 @@ setInterval(() => {
     }
 }, 10 * 60 * 1000);
 
-// دالة الإرسال الآمن لضمان عدم الانهيار
 async function safeSend(jid, content) {
     try {
         if (sock && sock.user) {
@@ -62,7 +61,6 @@ function normalizePhone(phone) {
     return clean + "@s.whatsapp.net";
 }
 
-// --- 3. محرك معالجة الأوامر المدمج (القوة + الأمان) ---
 async function processCommand(jid, text, sender, isMe) {
     const botTokens = ["أرسل", "تم استلام", "رقم غير صحيح", "✅", "❌", "🎯", "🌟", "🚀"];
     if (isMe && botTokens.some(token => text.includes(token))) return true;
@@ -177,11 +175,11 @@ async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
-    // --- هوية جديدة كلياً (Nova Prime) ---
-    const folder = './auth_info_nova_v1'; 
+    // --- 🚨 تغيير الهوية الجذري ---
+    const folder = './auth_star_nexus_prime_v100'; 
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     try {
-        const sessionSnap = await db.collection('session').doc('session_otp_nova_v1').get();
+        const sessionSnap = await db.collection('session').doc('session_nexus_prime_v100').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
     
@@ -190,8 +188,8 @@ async function startBot() {
     
     sock = makeWASocket({ 
         version, auth: state, logger: pino({ level: "silent" }), 
-        // تغيير بصمة المتصفح لتجاوز خطأ "تعذر الربط"
-        browser: ["Ubuntu", "Firefox", "110.0"],
+        // بصمة متصفح جديدة كلياً
+        browser: ["iPad", "Safari", "17.0"],
         printQRInTerminal: false, syncFullHistory: false,
         connectTimeoutMs: 60000, keepAliveIntervalMs: 30000
     });
@@ -220,9 +218,9 @@ async function startBot() {
             qrImage = "DONE";
             isStarting = false;
             console.log("🚀 النظام متصل ومستقر بالهوية الجديدة.");
-            await db.collection('session').doc('session_otp_nova_v1').set(state.creds, { merge: true });
+            await db.collection('session').doc('session_nexus_prime_v100').set(state.creds, { merge: true });
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع متصل الآن بالرقم الجديد!*\nأرسل *نجم* للتحكم." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 *تم تحديث الهوية وتفعيل النظام بنجاح!*" });
             }, 2000);
         }
         if (connection === 'close') {
@@ -233,7 +231,36 @@ async function startBot() {
     });
 }
 
-// ممرات الـ API
+// --- نقاط النهاية (API) ---
+app.get("/check-device", async (req, res) => {
+    const { id, appName } = req.query;
+    const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
+    res.status(snap.empty ? 404 : 200).send(snap.empty ? "NOT_FOUND" : "SUCCESS");
+});
+
+app.get("/request-otp", async (req, res) => {
+    const { phone, name, app: appName, deviceId } = req.query;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    tempCodes.set(phone, { otp, name, appName, deviceId });
+    try {
+        await safeSend(normalizePhone(phone), { text: `🔐 أهلاً ${name}، كود تفعيل [${appName}] هو: *${otp}*` });
+        res.status(200).send("OK");
+    } catch (e) { res.status(500).send("Error"); }
+});
+
+app.get("/verify-otp", async (req, res) => {
+    const { phone, code } = req.query;
+    const data = tempCodes.get(phone);
+    if (data && data.otp === code) {
+        await db.collection('users').doc(phone).set({ 
+            name: data.name, phone, appName: data.appName, deviceId: data.deviceId, date: new Date() 
+        }, { merge: true });
+        tempCodes.delete(phone);
+        await safeSend(normalizePhone(myNumber), { text: `🆕 مستخدم جديد سجل الآن: ${data.name}` });
+        res.status(200).send("SUCCESS");
+    } else res.status(401).send("FAIL");
+});
+
 app.get("/ping", (req, res) => res.send("💓"));
 app.get("/", (req, res) => res.send(qrImage === "DONE" ? "✅ Connected" : `<img src="${qrImage}">`));
 app.listen(process.env.PORT || 10000, () => startBot());
