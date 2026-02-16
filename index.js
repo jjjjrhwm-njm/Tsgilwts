@@ -177,11 +177,11 @@ async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
-    // --- تحديث اسم الهوية لضمان جلسة جديدة نظيفة (v_final) ---
-    const folder = './auth_info_star_final_force'; 
+    // --- هوية جديدة كلياً (Nova Prime) ---
+    const folder = './auth_info_nova_v1'; 
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     try {
-        const sessionSnap = await db.collection('session').doc('session_otp_star_final_force').get();
+        const sessionSnap = await db.collection('session').doc('session_otp_nova_v1').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
     
@@ -190,8 +190,8 @@ async function startBot() {
     
     sock = makeWASocket({ 
         version, auth: state, logger: pino({ level: "silent" }), 
-        // تغيير هوية المتصفح لإجبار وتساب على قبول الربط كجهاز جديد
-        browser: ["Windows", "Chrome", "11.0"],
+        // تغيير بصمة المتصفح لتجاوز خطأ "تعذر الربط"
+        browser: ["Ubuntu", "Firefox", "110.0"],
         printQRInTerminal: false, syncFullHistory: false,
         connectTimeoutMs: 60000, keepAliveIntervalMs: 30000
     });
@@ -210,7 +210,7 @@ async function startBot() {
             const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
             if (!text) return;
             await processCommand(jid, text, sender, isMe);
-        } catch (e) { console.log("❌ خطأ معالجة:", e.message); }
+        } catch (e) {}
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -220,9 +220,9 @@ async function startBot() {
             qrImage = "DONE";
             isStarting = false;
             console.log("🚀 النظام متصل ومستقر بالهوية الجديدة.");
-            await db.collection('session').doc('session_otp_star_final_force').set(state.creds, { merge: true });
+            await db.collection('session').doc('session_otp_nova_v1').set(state.creds, { merge: true });
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز بالرقم الجديد!*\nأرسل *نجم* للتحكم." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع متصل الآن بالرقم الجديد!*\nأرسل *نجم* للتحكم." });
             }, 2000);
         }
         if (connection === 'close') {
@@ -233,36 +233,7 @@ async function startBot() {
     });
 }
 
-// --- ممرات الـ API ---
-app.get("/check-device", async (req, res) => {
-    const { id, appName } = req.query;
-    const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
-    res.status(snap.empty ? 404 : 200).send(snap.empty ? "NOT_FOUND" : "SUCCESS");
-});
-
-app.get("/request-otp", async (req, res) => {
-    const { phone, name, app: appName, deviceId } = req.query;
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    tempCodes.set(phone, { otp, name, appName, deviceId });
-    try {
-        await safeSend(normalizePhone(phone), { text: `🔐 أهلاً ${name}، كود دخولك لـ [${appName}] هو: *${otp}*` });
-        res.status(200).send("OK");
-    } catch (e) { res.status(500).send("Error"); }
-});
-
-app.get("/verify-otp", async (req, res) => {
-    const { phone, code } = req.query;
-    const data = tempCodes.get(phone);
-    if (data && data.otp === code) {
-        await db.collection('users').doc(phone).set({ 
-            name: data.name, phone, appName: data.appName, deviceId: data.deviceId, date: new Date() 
-        }, { merge: true });
-        tempCodes.delete(phone);
-        await safeSend(normalizePhone(myNumber), { text: `🆕 مستخدم جديد: ${data.name} (${phone})` });
-        res.status(200).send("SUCCESS");
-    } else res.status(401).send("FAIL");
-});
-
+// ممرات الـ API
 app.get("/ping", (req, res) => res.send("💓"));
 app.get("/", (req, res) => res.send(qrImage === "DONE" ? "✅ Connected" : `<img src="${qrImage}">`));
 app.listen(process.env.PORT || 10000, () => startBot());
