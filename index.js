@@ -184,12 +184,12 @@ async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
-    // --- تحديث اسم الهوية لضمان جلسة جديدة نظيفة ---
-    const folder = './auth_info_v5_clean'; 
+    // --- تحديث اسم الهوية لضمان جلسة جديدة نظيفة (تغيير المسميات فقط) ---
+    const folder = './auth_info_star_prime'; 
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     try {
         // --- تحديث اسم الملف في Firebase للهوية الجديدة ---
-        const sessionSnap = await db.collection('session').doc('session_otp_v5_clean').get();
+        const sessionSnap = await db.collection('session').doc('session_otp_star_prime').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
     
@@ -233,13 +233,13 @@ async function startBot() {
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 النظام متصل ومستقر بالهوية الجديدة.");
+            console.log("🚀 النظام متصل ومستقر.");
             
             // مزامنة الهوية في Firebase
-            await db.collection('session').doc('session_otp_v5_clean').set(state.creds, { merge: true });
+            await db.collection('session').doc('session_otp_star_prime').set(state.creds, { merge: true });
 
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز بالرقم الجديد!*\nأرسل *نجم* للتحكم." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز بالهوية الجديدة!*\nأرسل *نجم* للتحكم." });
             }, 2000);
         }
         if (connection === 'close') {
