@@ -17,9 +17,9 @@ app.use(express.json());
 let sock;
 let qrImage = ""; 
 const tempCodes = new Map();
-const myNumber = "966554526287"; // رقمك بدون إضافات
+const myNumber = "966554526287"; // رقمك للتحكم بدون إضافات
 
-// إعداد Firebase
+// --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
 const serviceAccount = JSON.parse(firebaseConfig);
 if (!admin.apps.length) {
@@ -30,7 +30,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// نبض القلب
+// --- 2. نبض القلب (Keep-Alive) ---
 setInterval(() => {
     if (process.env.RENDER_EXTERNAL_HOSTNAME) {
         https.get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}/ping`);
@@ -71,12 +71,11 @@ async function startBot() {
         } catch (e) {}
     });
 
-    // --- نظام الأوامر المطور (تم إصلاح التحقق من الرقم) ---
+    // --- نظام الأوامر المطور (نجم نشر، نجم احصا، نجم حضر) ---
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
         
-        // تنظيف رقم المرسل لضمان عمل الأوامر
         const sender = msg.key.remoteJid.split('@')[0].split(':')[0];
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
@@ -87,34 +86,36 @@ async function startBot() {
             const link = text.replace("نجم نشر", "").trim();
             const usersSnap = await db.collection('users').get();
             usersSnap.forEach(async (doc) => {
-                await sock.sendMessage(normalizePhone(doc.data().phone), { text: `📢 تطبيق جديد!\n🚀 حمله من هنا: ${link}` });
+                await sock.sendMessage(normalizePhone(doc.data().phone), { 
+                    text: `📢 تطبيق جديد من نجم الإبداع!\n🚀 حمله من هنا: ${link}` 
+                });
             });
-            await sock.sendMessage(msg.key.remoteJid, { text: "✅ جاري النشر للجميع..." });
+            await sock.sendMessage(msg.key.remoteJid, { text: "✅ جاري النشر لجميع المشتركين..." });
         }
 
         // 2. نجم احصا
         if (text === "نجم احصا") {
             const usersSnap = await db.collection('users').get();
-            await sock.sendMessage(msg.key.remoteJid, { text: `📊 عدد المستخدمين المسجلين: ${usersSnap.size}` });
+            await sock.sendMessage(msg.key.remoteJid, { text: `📊 إحصائياتك:\n👥 إجمالي المستخدمين: ${usersSnap.size}` });
         }
 
-        // 3. نجم حضر
+        // 3. نجم حضر (قائمة التطبيقات)
         if (text === "نجم حضر") {
             const usersSnap = await db.collection('users').get();
             let apps = [...new Set(usersSnap.docs.map(d => d.data().appName || "عام"))];
             let list = "📱 تطبيقاتك المبرمجة:\n";
-            apps.forEach((name, i) => list += `${i + 1} - ${name}\n`);
-            await sock.sendMessage(msg.key.remoteJid, { text: list + "\n💡 أرسل الرقم لعرض المستخدمين." });
+            apps.forEach((name, i) => list += `${i + 1} - تطبيق ${name}\n`);
+            await sock.sendMessage(msg.key.remoteJid, { text: list + "\n💡 أرسل رقم التطبيق لعرض مستخدميه." });
         }
 
-        // عرض مستخدمي تطبيق معين (مثلاً 1 أو 2)
+        // فرز المستخدمين حسب الرقم (1، 2، إلخ)
         if (/^\d+$/.test(text) && text.length < 3) {
             const usersSnap = await db.collection('users').get();
             let apps = [...new Set(usersSnap.docs.map(d => d.data().appName || "عام"))];
             const selected = apps[parseInt(text) - 1];
             if (selected) {
                 let userList = `👥 مستخدمي [${selected}]:\n`;
-                usersSnap.docs.filter(d => d.data().appName === selected).forEach(d => {
+                usersSnap.docs.filter(d => (d.data().appName || "عام") === selected).forEach(d => {
                     userList += `👤 ${d.data().name} (${d.data().phone})\n`;
                 });
                 await sock.sendMessage(msg.key.remoteJid, { text: userList });
@@ -130,10 +131,10 @@ async function startBot() {
     });
 }
 
-// ممر فحص بصمة الجهاز (منع إعادة التسجيل عند مسح البيانات)
+// ممر فحص الجهاز (للدخول التلقائي)
 app.get("/check-device", async (req, res) => {
-    const deviceId = req.query.id;
-    const userSnap = await db.collection('users').where("deviceId", "==", deviceId).get();
+    const { id } = req.query;
+    const userSnap = await db.collection('users').where("deviceId", "==", id).get();
     if (!userSnap.empty) res.status(200).send("SUCCESS");
     else res.status(404).send("NOT_FOUND");
 });
@@ -143,10 +144,13 @@ app.get("/request-otp", async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     tempCodes.set(phone, otp);
     try {
-        // حفظ البيانات مع بصمة الجهاز
-        await db.collection('users').doc(phone).set({ name, phone, appName, deviceId, date: new Date() }, { merge: true });
-        await sock.sendMessage(normalizePhone(phone), { text: `🔐 يا ${name}، كودك هو: *${otp}*` });
-        await sock.sendMessage(normalizePhone(myNumber), { text: `🆕 مستخدم جديد في ${appName}!\n👤 ${name} (${phone})` });
+        await db.collection('users').doc(phone).set({ 
+            name, phone, appName: appName || "عام", deviceId, date: new Date() 
+        }, { merge: true });
+        await sock.sendMessage(normalizePhone(phone), { text: `🔐 يا ${name}، كود تحقق تطبيقك هو: *${otp}*` });
+        await sock.sendMessage(normalizePhone(myNumber), { 
+            text: `🆕 عضو جديد!\n👤 الاسم: ${name}\n📞 الرقم: ${phone}\n📱 التطبيق: ${appName}` 
+        });
         res.status(200).send("OK");
     } catch (e) { res.status(500).send("Error"); }
 });
